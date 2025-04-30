@@ -70,11 +70,13 @@ class RepoStat:
 class Repo:
     upstream: str
     path: pathlib.Path
+    path_link: pathlib.Path
     fetch: float # monotonic
     access_time: float # unix timestamp
     access_count: int
-    relative_path_data: pathlib.Path
-    relative_path_link: pathlib.Path
+    relative_path_data: str
+    relative_path_link: str
+    relative_data_from_link: str
     lock: asyncio.Lock
 
     def __init__(self, upstream: str, parent: pathlib.Path):
@@ -82,7 +84,10 @@ class Repo:
         self.upstream = upstream
         self.relative_path_data = Repo.calculate_relative_path_data(upstream)
         self.relative_path_link = Repo.calculate_relative_path_link(upstream)
+        self.relative_data_from_link = "../"* self.relative_path_link.count('/') + self.relative_path_data
+        print(self.relative_data_from_link)
         self.path = parent / self.relative_path_data
+        self.path_link = parent / self.relative_path_link
         self.fetch = 0
         self.access_time = 0
         self.access_count = 0
@@ -116,10 +121,10 @@ class Repo:
 
     async def update(self):
         async with self.lock:
-            self.fetch = time.monotonic()
             print(f"[gacher] updating '{self.upstream}'")
             await run_async_check('git', 'fetch', 'origin', '+refs/*:refs/*', cwd=self.path)
             print(f"[gacher] updated '{self.upstream}'")
+            self.fetch = time.monotonic()
 
     def stat(self, time_now: float, times: Times) -> RepoStat:
         age = time_now - self.fetch
@@ -145,8 +150,9 @@ class Repos:
     path_data: pathlib.Path
     path_links: pathlib.Path
     match_name: re.Pattern
+    redirect: str
 
-    def __init__(self, path: pathlib.Path, times: Times, interval: int):
+    def __init__(self, path: pathlib.Path, times: Times, interval: int, redirect: str):
         self.path = path
         self.repos = {}
         self.lock = asyncio.Lock()
@@ -155,6 +161,7 @@ class Repos:
         self.path_data = self.path / 'data'
         self.path_links = self.path / 'links'
         self.match_name = re.compile(r'[0-9a-f]{16}')
+        self.redirect = redirect
 
     async def find_or_create_repo(self, upstream: str) -> Repo:
         async with self.lock:
@@ -201,6 +208,25 @@ class Repos:
                 if time.time() - entry.stat().st_ctime <= self.times.remove:
                     continue
                 shutil.rmtree(entry)
+            # links
+            for entry in self.path_links.glob("**"):
+                if not entry.name.endswith(".git"):
+                    continue
+                if not entry.is_symlink():
+                    continue
+                if entry.exists():
+                    continue
+                entry.unlink()
+            links_targets = []
+            async with self.lock:
+                for repo in self.repos.values():
+                    links_targets.append((repo.path_link, repo.relative_data_from_link))
+            for (link, target) in links_targets:
+                try:
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    link.symlink_to(target, target_is_directory=False)
+                except:
+                    pass
             # update
             for repo in self.repos.values():
                 if repo.lock.locked():
@@ -284,12 +310,17 @@ async def route_cache(request):
         return web.Response(status=403, text=f"service {upstream} not supported")
     if not upstream.endswith(".git"):
         upstream += ".git"
+    upstream_redirectable = upstream
     host = upstream.split('/', maxsplit=1)[0]
     if is_ip(host) or host.endswith(".lan") or not '.' in host:
         upstream = f"http://{upstream}"
     else:
         upstream = f"https://{upstream}"
     await repos.update_repo(upstream)
+    if repos.redirect:
+        redirect = f"{repos.redirect}{upstream_redirectable}{tail}?{request.query_string}"
+        print(f"[gacher] redirecting to {redirect}")
+        return web.HTTPMovedPermanently(redirect)
     response = web.StreamResponse()
     env = {
         "CONTENT_TYPE": request.headers.get('Content-Type', ''),
@@ -362,6 +393,7 @@ async def route_help(request):
             - when fetching through such cache, if the corresponding repo was already fetched and updated shorter than {time_hot} seconds (by default 10 seconds), the local cache would be used
             - if a cached repo was not touched longer than {time_warm} seconds (by default 3600 seconds, i.e. 1 hr), it would be updated to sync with upstream
             - local cache would be considered daed and removed after not being touched for longer than {time_cold} seconds (by default 604800 seconds, i.e. 7 days)
+            - if {redirect} is set, after repo cached, instead of serving it directly, a 301 redirect would be returned to it on which e.g. nginx + cgit + git-http-backend is running and performs better than aiohttp
 
         /stat:
             - return JSON-formatted stat of all repos
@@ -378,12 +410,13 @@ if __name__ == '__main__':
     parser.add_argument('--host', default='0.0.0.0', type=str, help="host to bind to")
     parser.add_argument('--port', default=8080, type=int, help="port to bind to")
     parser.add_argument('--repos', default='repos', type=str, help="path to folder to store repos in, subfolder data would contain real repo, and subfolder links would contain human-friendly links")
-    parser.add_argument('--reset', action='store_true', help="remove everything in {repos}, instead of trying to pick existing repos up")
+    parser.add_argument('--reset', action='store_true', help="on startup, remove everything in {repos}, instead of trying to pick existing repos up")
     parser.add_argument('--time-hot', default=10, type=int, help="time in seconds after which a repo shall be updated when it is being fetched by a client")
     parser.add_argument('--time-warm', default=3600, type=int, help="time in seconds after which a repo shall be updated when it has not been fetched by any client")
     parser.add_argument('--time-drop', default=86400, type=int, help="time in seconds after which a repo shall be dropped/unmanaged if it hasn't been reached by any client")
     parser.add_argument('--time-remove', default=604800, type=int, help="time in seconds after which a unmanaged repo shall be removed/deleted")
-    parser.add_argument('--interval', default=1, type=int, help="time in seconds to perform routine check and act accordingly to time_warm and time_cold")
+    parser.add_argument('--interval', default=1, type=int, help="time interval in seconds to perform routine check and act accordingly to time_warm and time_cold")
+    parser.add_argument('--redirect', default='', type=str, help="instead of serving the cached repos directly by ourselves, return 301 redirect to such address, useful if you combine gacher with a web frontend, e.g. cgit, it is recommended to use {repos}/links as its root in that case")
 
     args = parser.parse_args()
     if args.time_remove <= args.time_drop:
@@ -391,7 +424,7 @@ if __name__ == '__main__':
     if args.time_warm <= args.time_hot:
         raise ValueError("time_warm must be longer than time_hot")
 
-    repos = Repos(pathlib.Path(args.repos), Times(args.time_hot, args.time_warm, args.time_drop, args.time_remove), args.interval)
+    repos = Repos(pathlib.Path(args.repos), Times(args.time_hot, args.time_warm, args.time_drop, args.time_remove), args.interval, args.redirect)
 
     async def on_startup(app):
         if args.reset:
