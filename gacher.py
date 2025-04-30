@@ -311,11 +311,17 @@ async def route_cache(request):
     if not upstream.endswith(".git"):
         upstream += ".git"
     upstream_redirectable = upstream
-    host = upstream.split('/', maxsplit=1)[0]
+    upstream_splitted = upstream.split("/", maxsplit=1)
+    try:
+        path = upstream_splitted[1]
+    except:
+        path = ''
+    host = upstream_splitted[0].lower()
     if is_ip(host) or host.endswith(".lan") or not '.' in host:
-        upstream = f"http://{upstream}"
+        scheme = 'http://'
     else:
-        upstream = f"https://{upstream}"
+        scheme = 'https://'
+    upstream = f"{scheme}{host}/{path}"
     await repos.update_repo(upstream)
     if repos.redirect:
         redirect = f"{repos.redirect}{upstream_redirectable}{tail}?{request.query_string}"
