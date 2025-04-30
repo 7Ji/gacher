@@ -121,9 +121,26 @@ class Repo:
     async def update(self):
         async with self.lock:
             print(f"[gacher] updating '{self.upstream}'")
-            await run_async_check('git', 'fetch', 'origin', '+refs/*:refs/*', cwd=self.path)
-            print(f"[gacher] updated '{self.upstream}'")
+            try:
+                await run_async_check('git', 'fetch', 'origin', '+refs/*:refs/*', max_tries=3, cwd=self.path)
+            except:
+                print(f"[gacher] failed to upate '{self.upstream}'")
+                return
             self.fetch = time.monotonic()
+            print(f"[gacher] updated '{self.upstream}'")
+            proc = await asyncio.create_subprocess_exec(
+                'git', 'ls-remote', '--symref', 'origin', 'HEAD',
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                cwd=self.path
+            )
+            await proc.wait()
+            if proc.returncode == 0:
+                for line in (await proc.stdout.read()).splitlines():
+                    if line.startswith(b'ref: ') and line.endswith(b'\tHEAD'):
+                        head = line[5:-5].decode('utf-8')
+                        await run_async_check('git', 'symbolic-ref', 'HEAD', head, cwd=self.path)
+                        return
 
     def stat(self, time_now: float, times: Times) -> RepoStat:
         age = time_now - self.fetch
