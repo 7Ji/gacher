@@ -85,7 +85,6 @@ class Repo:
         self.relative_path_data = Repo.calculate_relative_path_data(upstream)
         self.relative_path_link = Repo.calculate_relative_path_link(upstream)
         self.relative_data_from_link = "../"* self.relative_path_link.count('/') + self.relative_path_data
-        print(self.relative_data_from_link)
         self.path = parent / self.relative_path_data
         self.path_link = parent / self.relative_path_link
         self.fetch = 0
@@ -107,7 +106,7 @@ class Repo:
 
     @classmethod
     def calculate_relative_path_data(cls, upstream: str) -> str:
-        return f"data/{xxhash.xxh64_hexdigest(upstream)}"
+        return f"data/{xxhash.xxh3_64_hexdigest(upstream)}"
 
     @classmethod
     def calculate_relative_path_link(cls, upstream: str) -> str:
