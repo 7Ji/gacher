@@ -409,7 +409,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
                     prog='gacher',
                     description='a read-only git caching server',
-                    epilog='to access gacher you need to access it via the /cache/ path, e.g. http://gacher.lan:8090/cache/github.com/7Ji/gacher.git; access /help for HTTP help message',
+                    epilog='to access gacher you need to access it via the /cache/ path, e.g. http://gacher.lan:8080/cache/github.com/7Ji/gacher.git; access /help for HTTP help message',
                     formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
