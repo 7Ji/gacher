@@ -110,6 +110,8 @@ class Repo:
             self.path.mkdir(parents=True)
             await run_async_check('git', 'init', '--bare', self.path)
             await run_async_check('git', 'remote', 'add', '--mirror=fetch', 'origin', self.upstream, cwd=self.path)
+        self.path_link.parent.mkdir(parents=True, exist_ok=True)
+        self.path_link.symlink_to(self.relative_data_from_link, target_is_directory=False)
 
     def fill_access_time(self):
         self.access_time = self.path_config.stat().st_mtime
@@ -247,16 +249,6 @@ class Repos:
                 if entry.exists():
                     continue
                 entry.unlink()
-            links_targets = []
-            async with self.lock:
-                for repo in self.repos.values():
-                    links_targets.append((repo.path_link, repo.relative_data_from_link))
-            for (link, target) in links_targets:
-                try:
-                    link.parent.mkdir(parents=True, exist_ok=True)
-                    link.symlink_to(target, target_is_directory=False)
-                except:
-                    pass
             # update
             for repo in self.repos.values():
                 if repo.lock.locked():
