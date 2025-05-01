@@ -71,6 +71,7 @@ class RepoStat:
 class Repo:
     upstream: str
     path: pathlib.Path
+    path_config: pathlib.Path # used for access time (hack)
     path_link: pathlib.Path
     fetch: float # monotonic
     access_time: float # unix timestamp
@@ -87,12 +88,20 @@ class Repo:
         self.relative_path_link = Repo.calculate_relative_path_link(upstream)
         self.relative_data_from_link = "../"* self.relative_path_link.count('/') + self.relative_path_data
         self.path = parent / self.relative_path_data
+        self.path_config = self.path / 'config'
         self.path_link = parent / self.relative_path_link
         self.fetch = 0
         self.access_time = 0
         self.access_count = 0
         self.lock = asyncio.Lock()
         print(f"[gacher] added repo '{self.relative_path_link}' -> '{self.relative_path_data}'")
+
+    @classmethod
+    async def new(cls, upstream: str, parent: pathlib.Path):
+        repo = Repo(upstream, parent)
+        await repo.ensure_exist()
+        repo.fill_access_time()
+        return repo
 
     async def ensure_exist(self):
         print(f"[gacher] ensuring existence of '{self.path}'")
@@ -103,7 +112,7 @@ class Repo:
             await run_async_check('git', 'remote', 'add', '--mirror=fetch', 'origin', self.upstream, cwd=self.path)
 
     def fill_access_time(self):
-        self.access_time = self.path.stat().st_mtime
+        self.access_time = self.path_config.stat().st_mtime
 
     @classmethod
     def calculate_relative_path_data(cls, upstream: str) -> str:
@@ -117,7 +126,7 @@ class Repo:
         async with self.lock:
             self.access_time = time.time()
             self.access_count += 1
-            self.path.touch()
+            self.path_config.touch()
 
     async def update(self):
         async with self.lock:
@@ -135,12 +144,17 @@ class Repo:
                 stdout=asyncio.subprocess.PIPE,
                 cwd=self.path
             )
+            with open(self.path / "HEAD", "rb") as f:
+                head_local = f.read()
+            head_local = head_local[5:-1]
             await proc.wait()
             if proc.returncode == 0:
                 for line in (await proc.stdout.read()).splitlines():
                     if line.startswith(b'ref: ') and line.endswith(b'\tHEAD'):
-                        head = line[5:-5].decode('utf-8')
-                        await run_async_check('git', 'symbolic-ref', 'HEAD', head, cwd=self.path)
+                        head_remote = line[5:-5]
+                        if head_remote != head_local:
+                            print(f"[gacher] repo '{self.upstream}' HEAD updated '{head_local.decode('utf-8')}' => '{head_remote.decode('utf-8')}'")
+                            await run_async_check('git', 'symbolic-ref', 'HEAD', head_remote, cwd=self.path)
                         return
 
     def stat(self, time_now: float, times: Times) -> RepoStat:
@@ -186,9 +200,7 @@ class Repos:
             try:
                 repo = self.repos[upstream]
             except KeyError as e:
-                repo = Repo(upstream, self.path)
-                await repo.ensure_exist()
-                repo.fill_access_time()
+                repo = await Repo.new(upstream, self.path)
                 self.repos[upstream] = repo
         return repo
 
@@ -282,10 +294,7 @@ class Repos:
                     continue
                 upstream = (await proc.stdout.read()).decode('utf-8').strip()
                 print(f"[gacher] discovered existing repo '{entry}' for '{upstream}'")
-                repo = Repo(upstream, self.path)
-                await repo.ensure_exist()
-                repo.fill_access_time()
-                self.repos[upstream] = repo
+                self.repos[upstream] = await Repo.new(upstream, self.path)
 
     async def reset(self):
         print(f"[gacher] resetting '{self.path}'")
