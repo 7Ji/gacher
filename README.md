@@ -80,8 +80,8 @@ server {
     try_files    $uri @cgit;
     access_log /var/log/nginx/gacher.access.log;
 
-    location /cache {
-        proxy_pass http://localhost:8080/cache;
+    location ^~ /cache {
+        proxy_pass http://127.0.0.1:19418/cache;
         proxy_buffering off;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-Host $host;
@@ -137,7 +137,7 @@ sudo systemctl enable --now nginx cgit fcgiwrap.socket
 
 Now just run gacher as daemon with `redirect` set to the main entry
 ```
-./gacher.py --repos /srv/gacher/repos --redirect http://gacher.lan/
+./gacher.py --port 19418 --repos /srv/gacher/repos --redirect http://gacher.lan/
 ```
 
 Web traffic goes as following:
