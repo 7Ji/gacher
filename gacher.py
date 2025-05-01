@@ -111,6 +111,8 @@ class Repo:
             await run_async_check('git', 'init', '--bare', self.path)
             await run_async_check('git', 'remote', 'add', '--mirror=fetch', 'origin', self.upstream, cwd=self.path)
         self.path_link.parent.mkdir(parents=True, exist_ok=True)
+        if self.path_link.exists():
+            self.path_link.unlink()
         self.path_link.symlink_to(self.relative_data_from_link, target_is_directory=False)
 
     def fill_access_time(self):
