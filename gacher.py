@@ -64,7 +64,8 @@ class Times:
 @dataclasses.dataclass
 class RepoStat:
     state: RepoState
-    age: float
+    lag: float
+    idle: float
     hit: int
 
 class Repo:
@@ -143,16 +144,17 @@ class Repo:
                         return
 
     def stat(self, time_now: float, times: Times) -> RepoStat:
-        age = time_now - self.fetch
+        lag = time_now - self.fetch
         if self.lock.locked():
             state = RepoState.UPDATING
-        elif age < times.hot:
+        elif lag < times.hot:
             state = RepoState.HOT
-        elif age < times.warm:
+        elif lag < times.warm:
             state = RepoState.WARM
         else:
             state = RepoState.COLD
-        return RepoStat(state, age, self.access_count)
+        idle = time.time() - self.access_time
+        return RepoStat(state, lag, idle, self.access_count)
 
     def need_update(self, timeout: float) -> bool:
         return time.monotonic() - self.fetch > timeout
@@ -413,8 +415,10 @@ async def route_help(request):
             - the real upstream URL is figured out by gacher internally, either with http:// prefix for supposedly remotes in LAN, or with https:// prefix for supposedly remotes from Internet
             - always read-only and you shall never push through the corresponding link
             - when fetching through such cache, if the corresponding repo was already fetched and updated shorter than {time_hot} seconds (by default 10 seconds), the local cache would be used
-            - if a cached repo was not touched longer than {time_warm} seconds (by default 3600 seconds, i.e. 1 hr), it would be updated to sync with upstream
-            - local cache would be considered daed and removed after not being touched for longer than {time_cold} seconds (by default 604800 seconds, i.e. 7 days)
+            - if a cached repo was not accessed longer than {time_warm} seconds (by default 3600 seconds, i.e. 1 hr), it would be updated to sync with upstream
+            - if a cached repo was not accessed longer than {time_drop} seconds (by default 86400 seconds, i.e. 1 day), it would be dropped from gacher's run-time storage (but kept on-disk)
+            - if a on-disk dropped repo was not accessed longer than {time_remove} seconds (by default 604800, i.e. 1 week), it would be removed entirely to free up disk space
+            - local cache would be considered daed and removed after not being touched for longer than {time_drop} seconds (by default 604800 seconds, i.e. 7 days)
             - if {redirect} is set, after repo cached, instead of serving it directly, a 301 redirect would be returned to it on which e.g. nginx + cgit + git-http-backend is running and performs better than aiohttp
 
         /stat:
@@ -437,7 +441,7 @@ if __name__ == '__main__':
     parser.add_argument('--time-warm', default=3600, type=int, help="time in seconds after which a repo shall be updated when it has not been fetched by any client")
     parser.add_argument('--time-drop', default=86400, type=int, help="time in seconds after which a repo shall be dropped/unmanaged if it hasn't been reached by any client")
     parser.add_argument('--time-remove', default=604800, type=int, help="time in seconds after which a unmanaged repo shall be removed/deleted")
-    parser.add_argument('--interval', default=1, type=int, help="time interval in seconds to perform routine check and act accordingly to time_warm and time_cold")
+    parser.add_argument('--interval', default=1, type=int, help="time interval in seconds to perform routine check and act accordingly to {time_warm}, {time_drop} and {time_remove}")
     parser.add_argument('--redirect', default='', type=str, help="instead of serving the cached repos directly by ourselves, return 301 redirect to such address, useful if you combine gacher with a web frontend, e.g. cgit, it is recommended to use {repos}/links as its root in that case")
 
     args = parser.parse_args()
