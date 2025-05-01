@@ -346,7 +346,7 @@ async def route_cache(request):
     await repos.update_repo(upstream)
     if repos.redirect:
         redirect = f"{repos.redirect}{upstream_redirectable}{tail}?{request.query_string}"
-        print(f"[gacher] redirecting to {redirect}")
+        print(f"[gacher] redirecting to '{redirect}'")
         return web.HTTPMovedPermanently(redirect)
     response = web.StreamResponse()
     env = {
