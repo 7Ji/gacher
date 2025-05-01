@@ -73,7 +73,7 @@ class Repo:
     path: pathlib.Path
     path_config: pathlib.Path # used for access time (hack)
     path_link: pathlib.Path
-    fetch: float # monotonic
+    fetch: float # unix timestamp
     access_time: float # unix timestamp
     access_count: int
     relative_path_data: str
@@ -140,7 +140,7 @@ class Repo:
             except:
                 print(f"[gacher] failed to upate '{self.upstream}'")
                 return
-            self.fetch = time.monotonic()
+            self.fetch = time.time()
             print(f"[gacher] updated '{self.upstream}'")
             proc = await asyncio.create_subprocess_exec(
                 'git', 'ls-remote', '--symref', 'origin', 'HEAD',
@@ -175,7 +175,7 @@ class Repo:
         return RepoStat(state, lag, idle, self.access_count)
 
     def need_update(self, timeout: float) -> bool:
-        return time.monotonic() - self.fetch > timeout
+        return time.time() - self.fetch > timeout
 
 class Repos:
     path: pathlib.Path
@@ -261,7 +261,7 @@ class Repos:
 
     async def stat(self) -> dict[str, RepoStat]:
         stat = {}
-        time_now = time.monotonic()
+        time_now = time.time()
         async with self.lock:
             for repo in self.repos.values():
                 stat[repo.upstream] = dataclasses.asdict(repo.stat(time_now, self.times))
