@@ -136,7 +136,7 @@ class Repo:
         async with self.lock:
             print(f"[gacher] updating '{self.upstream}'")
             try:
-                await run_async_check('git', 'fetch', 'origin', '+refs/*:refs/*', max_tries=3, cwd=self.path)
+                await run_async_check('git', 'fetch', '--no-show-forced-updates', 'origin', '+refs/*:refs/*', max_tries=3, cwd=self.path)
             except:
                 print(f"[gacher] failed to upate '{self.upstream}'")
                 return
