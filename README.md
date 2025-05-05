@@ -12,7 +12,7 @@ Just execute the main script `gacher.py`
 
 By default the server binds to `http://0.0.0.0:8080`, to use the cache fetch an upstream through the `/cache` route with corresponding path, e.g.:
 ```
-git clone http://127.0.0.1:8080/github.com/7Ji/gacher.git
+git clone http://127.0.0.1:8080/cache/github.com/7Ji/gacher.git
 ```
 
 gacher would figure out the upstream `https://github.com/7Ji/gacher.git`, fetch from it with `git` if it does not exist locally at `./repos/data/[hash of upsteam]` or is not new enough, then serve from the local cache `./repos/data/[hash of upstream]` by calling `git-http-backend` as a CGI and bridge the connection.
