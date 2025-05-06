@@ -359,7 +359,7 @@ async def route_cache(request):
     }
     if request.method == "POST":
         proc = await asyncio.create_subprocess_exec(
-            '/usr/lib/git-core/git-http-backend',
+            'git', 'http-backend',
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             env=env,
@@ -371,7 +371,7 @@ async def route_cache(request):
         await proc.stdin.wait_closed()
     else:
         proc = await asyncio.create_subprocess_exec(
-            '/usr/lib/git-core/git-http-backend',
+            'git', 'http-backend',
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             env=env,
