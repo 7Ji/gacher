@@ -428,6 +428,10 @@ async def route_help(request):
             - return JSON-formatted stat of all repos
     """))
 
+async def route_upstream(request):
+    redirect = f"{repos.redirect}{request.match_info.get('upstream', '')}?{request.query_string}"
+    return web.HTTPMovedPermanently(redirect)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
                     prog='gacher',
@@ -466,10 +470,15 @@ if __name__ == '__main__':
     app = web.Application()
     app.on_startup.append(on_startup)
 
+    if args.redirect:
+        route_root = route_upstream
+    else:
+        route_root = route_help
+
     app.add_routes([
         web.route('*', r'/cache/{upstream:.+}', route_cache),
         web.get("/stat", route_stat),
         web.route('*', '/help', route_help),
-        web.route('*', '/', route_help)
+        web.route('*', r'/{upstream:.*}', route_root)
     ])
     web.run_app(app, host=args.host, port=args.port)
