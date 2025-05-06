@@ -252,7 +252,7 @@ class Repos:
                     continue
                 entry.unlink()
             # update
-            for repo in self.repos.values():
+            for repo in tuple(self.repos.values()):
                 if repo.lock.locked():
                     continue
                 if repo.need_update(self.times.warm):
