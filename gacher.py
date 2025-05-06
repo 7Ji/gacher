@@ -135,31 +135,14 @@ class Repo:
     async def update(self):
         async with self.lock:
             print(f"[gacher] updating '{self.upstream}'")
-            proc_head = await asyncio.create_subprocess_exec(
-                'git', 'ls-remote', '--symref', 'origin', 'HEAD',
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                cwd=self.path
-            )
             try:
-                await run_async_check('git', 'fetch', '--no-show-forced-updates', 'origin', '+refs/*:refs/*', max_tries=3, cwd=self.path)
+                # git complains if remote origin was added with --mirror without =fetch or =push, so we added it with --mirror=fetch, that results in HEAD not being updated during fetch, to fix it we set remote.origin.mirror=true manually so fetch also updates HEAD
+                await run_async_check('git', '-c', 'remote.origin.mirror=true', '-c', 'fetch.showForcedUpdates=false', '-c', 'advice.fetchShowForcedUpdates=false', 'fetch', 'origin', '+refs/*:refs/*', max_tries=3, cwd=self.path)
             except:
                 print(f"[gacher] failed to upate '{self.upstream}'")
                 return
             self.fetch = time.time()
-            await proc_head.wait()
             print(f"[gacher] updated '{self.upstream}'")
-            with open(self.path / "HEAD", "rb") as f:
-                head_local = f.read()
-            head_local = head_local[5:-1]
-            if proc_head.returncode == 0:
-                for line in (await proc_head.stdout.read()).splitlines():
-                    if line.startswith(b'ref: ') and line.endswith(b'\tHEAD'):
-                        head_remote = line[5:-5]
-                        if head_remote != head_local:
-                            print(f"[gacher] repo '{self.upstream}' HEAD updated '{head_local.decode('utf-8')}' => '{head_remote.decode('utf-8')}'")
-                            await run_async_check('git', 'symbolic-ref', 'HEAD', head_remote, cwd=self.path)
-                        return
 
     def stat(self, time_now: float, times: Times) -> RepoStat:
         lag = time_now - self.fetch
