@@ -124,7 +124,7 @@ class Repo:
 
     @classmethod
     def calculate_relative_path_link(cls, upstream: str) -> str:
-        return f"links/{upstream.split("://", maxsplit=1)[1]}"
+        return f"links/{upstream.split('://', maxsplit=1)[1]}"
 
     async def touch(self):
         async with self.lock:
