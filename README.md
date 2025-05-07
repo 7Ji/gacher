@@ -64,6 +64,22 @@ gacher can be used as a standalone server application, or used in combination wi
 
 Just run `./gacher.py`, access to cache go through `http://[host]:8080/cache`, cached repos are served by `git-http-backend` called by gacher itself
 
+### Client auto URL override
+
+If you find writing prefix e.g. `http://127.0.0.1:8080/cache/` tedious and you want a transparent experience, you could configure a local git `url.insteadOf` config, e.g.:
+
+```
+git config --global url.http://127.0.0.1/cache/.insteadOf https://
+```
+
+You could also use it as one-time config instead of storing it globally, e.g.:
+
+```
+git -c url.http://127.0.0.1/cache/.insteadOf https:// clone [upstream url]
+```
+
+With this config, `git clone https://github.com/7Ji/gacher.git` automatically becomes `git clone http://127.0.0.1:8080/cache/github.com/7Ji/gacher.git`, your git clients fetches from gacher and gacher fetches from upstream then serves the local cache to you.
+
 ### With nginx and cgit
 
 As `gacher` maintains both `repos/data/[hash]` to avoid URL path confliction and `repos/links/[upstream]` to simplify lookup, you can combine it with a web frontend serving `repos/links`.
