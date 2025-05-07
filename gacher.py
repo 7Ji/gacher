@@ -39,8 +39,7 @@ class WorkStatus(int, enum.Enum):
 
 async def run_async_check(program, *args, max_tries=1, **kwds) -> WorkStatus:
     for _ in range(max_tries):
-        proc = await asyncio.create_subprocess_exec\
-        (
+        proc = await asyncio.create_subprocess_exec(
             program, *args,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
@@ -56,8 +55,7 @@ async def run_async_check_with_stdout(
     program, *args, max_tries=1, **kwds
 ) -> (WorkStatus, bytes):
     for _ in range(max_tries):
-        proc = await asyncio.create_subprocess_exec\
-        (
+        proc = await asyncio.create_subprocess_exec(
             program, *args,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
@@ -144,20 +142,16 @@ class Repo:
         self.times = RepoTimes()
         self.hits = 0
         self.lock = asyncio.Lock()
-        print(f"[gacher] added repo '{self.upstream}' -> \
-                                    '{self.paths.relative_data}'"
-        )
+        print(f"[gacher] repo '{self.upstream}' ->'{self.paths.relative_data}'")
 
     async def ensure_exist(self):
         print(f"[gacher] ensuring local repo existence of '{self.upstream}'")
         if not self.paths.data.is_dir():
-            print(f"[gacher] local repo for '{self.upstream}' does not exist, \
-                    creating '{self.paths.data}'")
+            print(f"[gacher] local repo for '{self.upstream}' does not exist, creating '{self.paths.data}'")
             self.paths.data.mkdir(parents=True)
             if await run_async_check('git', 'init', '--bare', self.paths.data) \
                 or \
-                await run_async_check\
-                (
+                await run_async_check(
                     'git', 'remote', 'add', '--mirror=fetch',
                     'origin', self.upstream,
                     cwd=self.paths.data
@@ -166,8 +160,7 @@ class Repo:
         self.paths.link.parent.mkdir(parents=True, exist_ok=True)
         if self.paths.link.exists():
             self.paths.link.unlink()
-        self.paths.link.symlink_to\
-        (
+        self.paths.link.symlink_to(
             self.paths.relative_data_from_link,
             target_is_directory=False
         )
@@ -182,7 +175,7 @@ class Repo:
         repo.first_touch()
         return repo
 
-    async def touch(self):
+    async def hit(self):
         async with self.lock:
             self.times.access = time.time()
             self.paths.config.touch()
@@ -198,8 +191,7 @@ class Repo:
         # or =push, so we added it with --mirror=fetch, that results in HEAD not
         # being updated during fetch, to fix it we set remote.origin.mirror=true
         # manually so fetch also updates HEAD
-        if await run_async_check\
-        (
+        if await run_async_check(
             'git',
                 '-c', 'remote.origin.mirror=true',
                 '-c', 'fetch.showForcedUpdates=false',
@@ -211,7 +203,7 @@ class Repo:
         ):
             print(f"[gacher] failed to upate '{self.upstream}'")
             return
-        self.fetch = time.time()
+        self.times.fetch = time.time()
         print(f"[gacher] updated '{self.upstream}'")
 
     async def update(self, time_hot: float):
@@ -288,6 +280,8 @@ class Worker:
                     continue
                 if not entry.is_dir():
                     continue
+                if time.time() - (entry / "config").stat().st_mtime > self.times.remove:
+                    continue
                 (status, child_out) = await run_async_check_with_stdout(
                     'git', 'config', 'remote.origin.url',
                     cwd=entry
@@ -312,10 +306,7 @@ class Worker:
 
     async def update_repo(self, upstream: str):
         repo = await self.get_repo(upstream)
-        await repo.touch()
-        # if not repo.need_update(self.times.hot):
-        #     print(f"[gacher] serving cached '{upstream}'")
-        #     return
+        await repo.hit()
         await repo.update(self.times.hot)
 
     async def routine_worker(self):
@@ -324,179 +315,77 @@ class Worker:
             # drop
             async with self.lock:
                 items = tuple(self.repos.items())
+            keys = set(item[0] for item in items)
             time_now = time.time()
-            for (upstream, repo) in items:
+            for (key, repo) in items:
                 if repo.lock.locked():
                     continue
                 if time_now - repo.times.access > self.times.drop:
+                    print(f"[gacher] dropping '{repo.upstream}' from run-time cache, the on-disk cache is kept in place")
                     async with self.lock:
-                        del self.repos[upstream]
+                        del self.repos[key]
             # remove
             for entry in self.paths.data.glob("*"):
                 if not match_name.match(entry.name):
                     continue
+                if entry.name in keys:
+                    continue
                 if not entry.is_dir():
                     continue
-                if time.time() - entry.stat().st_ctime <= self.times.remove:
+                if time.time() - (entry / "config").stat().st_mtime <= self.times.remove:
                     continue
+                print(f"[gacher] removing '{entry}' from disk")
                 shutil.rmtree(entry)
             # links
-            for entry in self.paths.links.glob("**"):
-                if not entry.name.endswith(".git"):
-                    continue
-                if not entry.is_symlink():
-                    continue
-                if entry.exists():
-                    continue
-                entry.unlink()
+            removed = True
+            while removed:
+                removed = False
+                for entry in self.paths.links.glob("**"):
+                    if entry.is_symlink():
+                        if entry.exists():
+                            continue
+                        try:
+                            entry.unlink()
+                            print(f"[gacher] removed dead symlink '{entry}'")
+                        except:
+                            pass
+                    elif entry.is_dir():
+                        try:
+                            entry.rmdir()
+                            print(f"[gacher] removed empty dir '{entry}'")
+                        except:
+                            pass
+
             # update
             for repo in tuple(self.repos.values()):
                 if repo.lock.locked():
                     continue
-                if repo.need_update(self.times.warm):
-                    await repo.update(self.times.hot)
+                await repo.update(self.times.warm)
             await asyncio.sleep(self.times.interval)
 
     async def stat(self) -> dict[str, RepoStat]:
         stat = {}
-        time_now = time.time()
         async with self.lock:
-            for repo in self.repos.values():
-                stat[repo.upstream] = dataclasses.asdict(repo.stat(time_now, self.times))
+            repos = tuple(self.repos.values())
+        for repo in repos:
+            stat[repo.upstream] = dataclasses.asdict(repo.stat(self.times))
         return stat
 
-def is_ip(ip: str) -> bool:
+def scheme_from_host(host: str) -> str:
+    hostname = urlparse(f"http://{host}").hostname
     try:
-        ipaddress.ip_address(ipv4invalid)
-        return True
+        ipaddress.ip_address(hostname)
+        return 'http://'
     except:
-        return False
+        pass
+    splitted = hostname.rsplit('.', 1)
+    if len(splitted) == 1 or splitted[1] == 'lan' or splitted[1] == 'local':
+        return 'http://'
+    return "https://"
 
 def response_bad_method(path: str, method: str, required: str):
-    text = f"access to {path} with method {method} is not supported, {required} GET is supported"
+    text = f"method {method} to {path} not allowed, allowing {required}"
     return web.Response(status=403, text=text)
-
-async def route_cache(request):
-    upstream: str = request.match_info.get('upstream', '')
-    if upstream.endswith("/HEAD"):
-        if request.method != "GET":
-            return response_bad_method("/HEAD", request.method, "GET")
-        upstream = upstream[:-5]
-        tail="/HEAD"
-    elif upstream.endswith("/info/refs"):
-        if request.method != "GET":
-            return response_bad_method("/info/refs", request.method, "GET")
-        upstream = upstream[:-10]
-        tail="/info/refs"
-    elif upstream.endswith("/git-upload-pack"):
-        if request.method != "POST":
-            return response_bad_method("/git-upload-pack", request.method, "POST")
-        upstream = upstream[:-16]
-        tail="/git-upload-pack"
-    else:
-        return web.Response(status=403, text=f"service {upstream} not supported")
-    if not upstream.endswith(".git"):
-        upstream += ".git"
-    upstream_redirectable = upstream
-    upstream_splitted = upstream.split("/", maxsplit=1)
-    try:
-        path = upstream_splitted[1]
-    except:
-        path = ''
-    host = upstream_splitted[0].lower()
-    if is_ip(host) or host.endswith(".lan") or not '.' in host:
-        scheme = 'http://'
-    else:
-        scheme = 'https://'
-    upstream = f"{scheme}{host}/{path}"
-    await worker.update_repo(upstream)
-    if worker.redirect:
-        redirect = f"{worker.redirect}{upstream_redirectable}{tail}?{request.query_string}"
-        print(f"[gacher] redirecting to '{redirect}'")
-        return web.HTTPMovedPermanently(redirect)
-    response = web.StreamResponse()
-    env = {
-        "CONTENT_TYPE": request.headers.get('Content-Type', ''),
-        "REQUEST_METHOD": request.method,
-        "PATH_INFO": f"/{RepoPaths.calculate_relative_data(upstream)}{tail}",
-        "QUERY_STRING": request.query_string,
-        "GIT_HTTP_EXPORT_ALL": "",
-        "GIT_PROJECT_ROOT": "."
-    }
-    if request.method == "POST":
-        proc = await asyncio.create_subprocess_exec(
-            'git', 'http-backend',
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=worker.paths.repos
-        )
-        proc.stdin.write(await request.read())
-        await proc.stdin.drain()
-        proc.stdin.close()
-        await proc.stdin.wait_closed()
-    else:
-        proc = await asyncio.create_subprocess_exec(
-            'git', 'http-backend',
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=worker.paths.repos
-        )
-    end_header = False
-    buffer_all = bytearray()
-    while True:
-        buffer = await proc.stdout.read(65536)
-        if not buffer:
-            break
-        if end_header:
-            await response.write(buffer)
-        else:
-            buffer_all += buffer
-            splitted = buffer_all.split(b'\r\n\r\n', 1)
-            if len(splitted) > 1:
-                for line in splitted[0].split(b'\r\n'):
-                    if len(line) == 0:
-                        continue
-                    key, value = line.split(b': ', maxsplit=1)
-                    response.headers.add(key.decode('utf-8'), value.decode('utf-8'))
-                await response.prepare(request)
-                await response.write(splitted[1])
-                end_header = True
-
-    await proc.wait()
-
-    return response
-
-async def route_stat(request):
-    return web.json_response(await repos.stat())
-
-async def route_help(request):
-    return web.Response(text=textwrap.dedent("""
-        gacher is a read-only git caching server and you shall access it through the following routing paths (the following examples all use http://gacher.lan:8080/ as the server and remember to adapt it accordingly):
-
-
-        /help, /:
-            - return this help message
-
-        /cache/:
-            - the main caching route, upstream URL shall be appended after it, e.g. http://gacher.lan:8080/cache/github.com/7Ji/ampart.git
-            - the real upstream URL is figured out by gacher internally, either with http:// prefix for supposedly remotes in LAN, or with https:// prefix for supposedly remotes from Internet
-            - always read-only and you shall never push through the corresponding link
-            - when fetching through such cache, if the corresponding repo was already fetched and updated shorter than {time_hot} seconds (by default 10 seconds), the local cache would be used
-            - if a cached repo was not accessed longer than {time_warm} seconds (by default 3600 seconds, i.e. 1 hr), it would be updated to sync with upstream
-            - if a cached repo was not accessed longer than {time_drop} seconds (by default 86400 seconds, i.e. 1 day), it would be dropped from gacher's run-time storage (but kept on-disk)
-            - if a on-disk dropped repo was not accessed longer than {time_remove} seconds (by default 604800, i.e. 1 week), it would be removed entirely to free up disk space
-            - local cache would be considered daed and removed after not being touched for longer than {time_drop} seconds (by default 604800 seconds, i.e. 7 days)
-            - if {redirect} is set, after repo cached, instead of serving it directly, a 301 redirect would be returned to it on which e.g. nginx + cgit + git-http-backend is running and performs better than aiohttp
-
-        /stat:
-            - return JSON-formatted stat of all repos
-    """))
-
-async def route_upstream(request):
-    redirect = f"{repos.redirect}{request.match_info.get('upstream', '')}?{request.query_string}"
-    return web.HTTPMovedPermanently(redirect)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -525,6 +414,104 @@ if __name__ == '__main__':
 
     worker = Worker(args.repos, WorkerTimes(args.time_hot, args.time_warm, args.time_drop, args.time_remove, args.interval), args.redirect)
 
+    async def route_cache(request):
+        scheme = request.match_info['scheme']
+        host = request.match_info['host']
+        if not host:
+            return web.Response(status=403, text="empty host in request")
+        if not scheme:
+            scheme = scheme_from_host(host)
+        path = request.match_info['path']
+        if not path:
+            return web.Response(status=403, text="no cachable path")
+        if not path.endswith(".git"):
+            path += ".git"
+        service = request.match_info['service']
+        if not service:
+            return web.Response(status=403, text="no valid git service")
+
+        upstream = f"{scheme}{host}/{path}"
+        await worker.update_repo(upstream)
+
+        if worker.redirect:
+            redirect = f"{worker.redirect}{host}/{path}/{service}?{request.query_string}"
+            print(f"[gacher] redirecting to '{redirect}'")
+            return web.HTTPMovedPermanently(redirect)
+
+        response = web.StreamResponse()
+        env = {
+            "CONTENT_TYPE": request.headers.get('Content-Type', ''),
+            "REQUEST_METHOD": request.method,
+            "PATH_INFO": f"/{RepoPaths.calculate_relative_data(upstream)}/{service}",
+            "QUERY_STRING": request.query_string,
+            "GIT_HTTP_EXPORT_ALL": "",
+            "GIT_PROJECT_ROOT": "."
+        }
+        if request.method == "POST":
+            proc = await asyncio.create_subprocess_exec(
+                'git', 'http-backend',
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                env=env,
+                cwd=worker.paths.repos
+            )
+            proc.stdin.write(await request.read())
+            await proc.stdin.drain()
+            proc.stdin.close()
+            await proc.stdin.wait_closed()
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                'git', 'http-backend',
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                env=env,
+                cwd=worker.paths.repos
+            )
+
+        for line in (await proc.stdout.readuntil(b'\r\n\r\n'))[:-4].split(b'\r\n'):
+            if len(line) == 0:
+                continue
+            splitted = line.split(b': ', 1)
+            if len(splitted) != 2:
+                continue
+            response.headers.add(splitted[0].decode('latin-1'), splitted[1].decode('latin-1'))
+        await response.prepare(request)
+
+        while True:
+            buffer = await proc.stdout.read(0x100000)
+            if not buffer:
+                break
+            await response.write(buffer)
+
+        await proc.wait()
+        await response.write_eof()
+
+        return response
+
+    async def route_stat(request):
+        return web.json_response(await worker.stat())
+
+    async def route_help(request):
+        return web.Response(text=textwrap.dedent(f"""
+            gacher is a read-only git caching server and you shall access it through the following routing paths (the following examples all use http://gacher.lan:{args.port}/ as the server and remember to adapt it accordingly):
+
+            /help{'' if args.redirect else ', /'}:
+                - return this help message
+
+            /cache/:
+                - the main caching route, upstream URL shall be appended after it, e.g. http://gacher.lan:{args.port}/cache/github.com/7Ji/ampart.git
+                - the real upstream URL is figured out by gacher internally, either with http:// prefix for supposedly remotes in LAN, or with https:// prefix for supposedly remotes from Internet
+                - always read-only and you shall never push through the corresponding link
+                - when fetching through such cache, if the corresponding repo was already fetched and updated shorter than {args.time_hot} seconds, the local cache would be used
+                - if a cached repo was not accessed longer than {args.time_warm} seconds, it would be updated to sync with upstream
+                - if a cached repo was not accessed longer than {args.time_drop} seconds, it would be dropped from gacher's run-time storage (but kept on-disk)
+                - if a on-disk dropped repo was not accessed longer than {args.time_remove} seconds, it would be removed entirely to free up disk space
+                - if '{args.redirect}' is set, after repo cached, instead of serving it directly, a 301 redirect would be returned to it on which e.g. nginx + cgit + git-http-backend is running and performs better than aiohttp
+
+            /stat:
+                - return JSON-formatted stat of all repos
+        """))
+
     async def on_startup(app):
         if args.reset:
             await worker.reset()
@@ -537,12 +524,15 @@ if __name__ == '__main__':
     app.on_startup.append(on_startup)
 
     if args.redirect:
+        async def route_upstream(request):
+            redirect = f"{worker.redirect}{request.rel_url}"
+            return web.HTTPMovedPermanently(redirect)
         route_root = route_upstream
     else:
         route_root = route_help
 
     app.add_routes([
-        web.route('*', r'/cache/{upstream:.+}', route_cache),
+        web.route('*', r'/cache/{scheme:((https?|git)://)?}{host}/{path:.+}/{service:(HEAD|info/refs|git-upload-pack)}', route_cache),
         web.get("/stat", route_stat),
         web.route('*', '/help', route_help),
         web.route('*', r'/{upstream:.*}', route_root)
