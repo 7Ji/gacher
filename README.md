@@ -41,7 +41,7 @@ Supported arguments are:
 ## Routes / API
 
 gacher has several routes including the main `/cache/` route, these are:
-- `/help`, `/` (any method)
+- `/help` (any method)
   - return pure-text help message about routes
 - `/cache/` (any method)
     - the main caching route, upstream URL shall be appended after it, e.g. http://gacher.lan:8080/cache/github.com/7Ji/ampart.git
@@ -51,10 +51,12 @@ gacher has several routes including the main `/cache/` route, these are:
     - if a cached repo was not accessed longer than `{time_warm}` seconds (by default 3600 seconds, i.e. 1 hr), it would be updated to sync with upstream
     - if a cached repo was not accessed longer than `{time_drop}` seconds (by default 86400 seconds, i.e. 1 day), it would be dropped from gacher's run-time storage (but kept on-disk)
     - if a on-disk dropped repo was not accessed longer than `{time_remove}` seconds (by default 604800, i.e. 1 week), it would be removed entirely to free up disk space
-    - local cache would be considered daed and removed after not being touched for longer than `{time_drop}` seconds (by default 604800 seconds, i.e. 7 days)
     - if `{redirect}` is set, after repo cached, instead of serving it directly, a 301 redirect would be returned to it on which e.g. nginx + cgit + git-http-backend is running and performs better than aiohttp
 - `/stat` (`GET`)
     - return JSON-formatted stat of all repos
+- `/` (any method)
+  - if `redirect` is not set, this returns pure-text help message about routes
+  - if `redirect` is set, redirects to it
 
 ## Examples
 
