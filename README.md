@@ -94,36 +94,35 @@ On e.g. Arch Linux, install `nginx`, `cgit`, `python-pygments`, `fcgiwrap`
 Configure a server block in nginx like following:
 ```
 server {
-    listen       80;
-    listen       [::]:80;
-    server_name  gacher.lan;
-    access_log   /var/log/nginx/gacher.lan.access.log;
+    listen      80;
+    listen      [::]:80;
+    server_name gacher.lan;
+    access_log  /var/log/nginx/gacher.lan.access.log;
 
     rewrite ^/(stat|help|cache/.*)$ http://$server_name:19418/$1 permanent;
 
     location ~ ^/.+\.git/(HEAD|info/refs|git-upload-pack)$ {
-        include             fastcgi_params;
-        fastcgi_param       SCRIPT_FILENAME     /usr/lib/git-core/git-http-backend;
-        fastcgi_param       PATH_INFO           $uri;
-        fastcgi_param       GIT_HTTP_EXPORT_ALL "";
-        fastcgi_param       GIT_PROJECT_ROOT    /srv/gacher/repos/links;
-        fastcgi_pass        unix:/run/fcgiwrap.sock;
-        fastcgi_read_timeout 3600;
-        client_max_body_size 50m;
+        include                 fastcgi_params;
+        fastcgi_param           SCRIPT_FILENAME     /usr/lib/git-core/git-http-backend;
+        fastcgi_param           PATH_INFO           $uri;
+        fastcgi_param           GIT_HTTP_EXPORT_ALL "";
+        fastcgi_param           GIT_PROJECT_ROOT    /srv/gacher/repos/links;
+        fastcgi_pass            unix:/run/fcgiwrap.sock;
+        fastcgi_read_timeout    3600;
+        client_max_body_size    50m;
+    }
+
+    location ~ ^/(cgit\.(cgi|css|js|png)|favicon\.ico|robots\.txt)$ {
+        root                    /usr/share/webapps/cgit;
     }
 
     location / {
-        root         /usr/share/webapps/cgit;
-        try_files    $uri @cgit;
-    }
-
-    location @cgit {
-        include             fastcgi_params;
-        fastcgi_param       SCRIPT_FILENAME /usr/lib/cgit/cgit.cgi;
-        fastcgi_param       PATH_INFO       $uri;
-        fastcgi_param       QUERY_STRING    $args;
-        fastcgi_param       HTTP_HOST       $server_name;
-        fastcgi_pass        unix:/run/fcgiwrap.sock;
+        include                 fastcgi_params;
+        fastcgi_param           SCRIPT_FILENAME     /usr/lib/cgit/cgit.cgi;
+        fastcgi_param           PATH_INFO           $uri;
+        fastcgi_param           QUERY_STRING        $args;
+        fastcgi_param           HTTP_HOST           $server_name;
+        fastcgi_pass            unix:/run/fcgiwrap.sock;
     }
 }
 ```
