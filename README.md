@@ -99,13 +99,7 @@ server {
     server_name  gacher.lan;
     access_log   /var/log/nginx/gacher.lan.access.log;
 
-    location ~ ^/cache/(.*)$ {
-        return 301 http://$server_name:19418/cache/$1$is_args$args;
-    }
-
-    location ~ ^/(stat|help)$ {
-        return 301 http://$server_name:19418/$1;
-    }
+    rewrite ^/(stat|help|cache/.*)$ http://$server_name:19418/$1 permanent;
 
     location ~ ^/.+\.git/(HEAD|info/refs|git-upload-pack)$ {
         include             fastcgi_params;
