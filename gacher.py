@@ -16,7 +16,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-
 from aiohttp import web
 import argparse
 import asyncio
@@ -31,11 +30,17 @@ import pathlib
 import shutil
 import textwrap
 import time
+from urllib.parse import urlparse
 import xxhash
 
-async def run_async_check(program, *args, max_tries=1, **kwds):
+class WorkStatus(int, enum.Enum):
+    OK = 0
+    BAD = 1
+
+async def run_async_check(program, *args, max_tries=1, **kwds) -> WorkStatus:
     for _ in range(max_tries):
-        proc = await asyncio.create_subprocess_exec(
+        proc = await asyncio.create_subprocess_exec\
+        (
             program, *args,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
@@ -43,9 +48,32 @@ async def run_async_check(program, *args, max_tries=1, **kwds):
         )
         await proc.wait()
         if proc.returncode == 0:
-            return
-    raise Exception(f"async child process {program} {args} failed after {max_tries} tries")
+            return WorkStatus.OK
+    print(f"[gacher] child {program} {args} failed after {max_tries} tries")
+    return WorkStatus.BAD
 
+async def run_async_check_with_stdout(
+    program, *args, max_tries=1, **kwds
+) -> (WorkStatus, bytes):
+    for _ in range(max_tries):
+        proc = await asyncio.create_subprocess_exec\
+        (
+            program, *args,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            **kwds
+        )
+        await proc.wait()
+        if proc.returncode == 0:
+            return (WorkStatus.OK, await proc.stdout.read())
+    print(f"[gacher] child {program} {args} failed after {max_tries} tries")
+    return (WorkStatus.BAD, None)
+
+def hash_str_to_str(content: str) -> str:
+    return xxhash.xxh3_64_hexdigest(content)
+
+def hash_str_to_bytes(content: str) -> bytes:
+    return xxhash.xxh3_64_digest(content)
 
 class RepoState(str, enum.Enum):
     UPDATING = "updating"
@@ -55,156 +83,243 @@ class RepoState(str, enum.Enum):
     DEAD = "dead"
 
 @dataclasses.dataclass
-class Times:
-    hot: int
-    warm: int
-    drop: int
-    remove: int
-
-@dataclasses.dataclass
 class RepoStat:
     state: RepoState
     lag: float
     idle: float
     hit: int
 
+class RepoPaths:
+    data: pathlib.Path # actual bare git repo, repos/data/[hash], determied len
+    config: pathlib.Path # [git]/config, touched to record access time on disk
+    link: pathlib.Path # human-readable link, undetermined depth
+    relative_data: str
+    relative_link: str
+    relative_data_from_link: str
+
+    # The upstream here already contains scheme
+    def __init__(self, upstream: str, parent: pathlib.Path):
+
+        self.relative_data = RepoPaths.calculate_relative_data(upstream)
+        self.data = parent / self.relative_data
+        self.config = self.data / 'config'
+
+        self.relative_link = RepoPaths.calculate_relative_link(upstream)
+        self.link = parent / self.relative_link
+
+        self.relative_data_from_link = \
+            "../" * self.relative_link.count('/') + self.relative_data
+
+    @staticmethod
+    def calculate_relative_data(upstream: str) -> str:
+        return f"data/{hash_str_to_str(upstream)}"
+
+    @staticmethod
+    def calculate_relative_link(upstream: str) -> str:
+        return f"links/{upstream.split('://', maxsplit=1)[1]}"
+
+@dataclasses.dataclass
+class RepoTimes:
+    fetch: float = 0 # unix timestamp
+    access: float = 0 # unix timestamp
+
+@dataclasses.dataclass
+class WorkerTimes:
+    hot: int
+    warm: int
+    drop: int
+    remove: int
+    interval: int
+
 class Repo:
     upstream: str
-    path: pathlib.Path
-    path_config: pathlib.Path # used for access time (hack)
-    path_link: pathlib.Path
-    fetch: float # unix timestamp
-    access_time: float # unix timestamp
-    access_count: int
-    relative_path_data: str
-    relative_path_link: str
-    relative_data_from_link: str
+    paths: RepoPaths
+    times: RepoTimes
+    hits: int
     lock: asyncio.Lock
 
     def __init__(self, upstream: str, parent: pathlib.Path):
-        self.lock = asyncio.Lock()
         self.upstream = upstream
-        self.relative_path_data = Repo.calculate_relative_path_data(upstream)
-        self.relative_path_link = Repo.calculate_relative_path_link(upstream)
-        self.relative_data_from_link = "../"* self.relative_path_link.count('/') + self.relative_path_data
-        self.path = parent / self.relative_path_data
-        self.path_config = self.path / 'config'
-        self.path_link = parent / self.relative_path_link
-        self.fetch = 0
-        self.access_time = 0
-        self.access_count = 0
+        self.paths = RepoPaths(upstream, parent)
+        self.times = RepoTimes()
+        self.hits = 0
         self.lock = asyncio.Lock()
-        print(f"[gacher] added repo '{self.relative_path_link}' -> '{self.relative_path_data}'")
+        print(f"[gacher] added repo '{self.upstream}' -> \
+                                    '{self.paths.relative_data}'"
+        )
+
+    async def ensure_exist(self):
+        print(f"[gacher] ensuring local repo existence of '{self.upstream}'")
+        if not self.paths.data.is_dir():
+            print(f"[gacher] local repo for '{self.upstream}' does not exist, \
+                    creating '{self.paths.data}'")
+            self.paths.data.mkdir(parents=True)
+            if await run_async_check('git', 'init', '--bare', self.paths.data) \
+                or \
+                await run_async_check\
+                (
+                    'git', 'remote', 'add', '--mirror=fetch',
+                    'origin', self.upstream,
+                    cwd=self.paths.data
+                ):
+                raise Exception("failed to init local repo")
+        self.paths.link.parent.mkdir(parents=True, exist_ok=True)
+        if self.paths.link.exists():
+            self.paths.link.unlink()
+        self.paths.link.symlink_to\
+        (
+            self.paths.relative_data_from_link,
+            target_is_directory=False
+        )
+
+    def first_touch(self):
+        self.times.access = self.paths.config.stat().st_mtime
 
     @classmethod
     async def new(cls, upstream: str, parent: pathlib.Path):
-        repo = Repo(upstream, parent)
+        repo = cls(upstream, parent)
         await repo.ensure_exist()
-        repo.fill_access_time()
+        repo.first_touch()
         return repo
-
-    async def ensure_exist(self):
-        print(f"[gacher] ensuring existence of '{self.path}'")
-        if not self.path.is_dir():
-            print(f"[gacher] local storage for '{self.upstream}' does not exist, creating '{self.path}'")
-            self.path.mkdir(parents=True)
-            await run_async_check('git', 'init', '--bare', self.path)
-            await run_async_check('git', 'remote', 'add', '--mirror=fetch', 'origin', self.upstream, cwd=self.path)
-        self.path_link.parent.mkdir(parents=True, exist_ok=True)
-        if self.path_link.exists():
-            self.path_link.unlink()
-        self.path_link.symlink_to(self.relative_data_from_link, target_is_directory=False)
-
-    def fill_access_time(self):
-        self.access_time = self.path_config.stat().st_mtime
-
-    @classmethod
-    def calculate_relative_path_data(cls, upstream: str) -> str:
-        return f"data/{xxhash.xxh3_64_hexdigest(upstream)}"
-
-    @classmethod
-    def calculate_relative_path_link(cls, upstream: str) -> str:
-        return f"links/{upstream.split('://', maxsplit=1)[1]}"
 
     async def touch(self):
         async with self.lock:
-            self.access_time = time.time()
-            self.access_count += 1
-            self.path_config.touch()
+            self.times.access = time.time()
+            self.paths.config.touch()
+            self.hits += 1
 
-    async def update(self):
+    def need_update(self, time_hot: float) -> bool:
+        return time.time() - self.times.fetch > time_hot
+
+    # this is only called in update(), lock was aquired there
+    async def update_inner(self):
+        print(f"[gacher] updating '{self.upstream}'")
+        # git complains if remote origin was added with --mirror without =fetch
+        # or =push, so we added it with --mirror=fetch, that results in HEAD not
+        # being updated during fetch, to fix it we set remote.origin.mirror=true
+        # manually so fetch also updates HEAD
+        if await run_async_check\
+        (
+            'git',
+                '-c', 'remote.origin.mirror=true',
+                '-c', 'fetch.showForcedUpdates=false',
+                '-c', 'advice.fetchShowForcedUpdates=false',
+            'fetch',
+                'origin', '+refs/*:refs/*',
+            max_tries=3,
+            cwd=self.paths.data
+        ):
+            print(f"[gacher] failed to upate '{self.upstream}'")
+            return
+        self.fetch = time.time()
+        print(f"[gacher] updated '{self.upstream}'")
+
+    async def update(self, time_hot: float):
+        if not self.need_update(time_hot):
+            return
         async with self.lock:
-            print(f"[gacher] updating '{self.upstream}'")
-            try:
-                # git complains if remote origin was added with --mirror without =fetch or =push, so we added it with --mirror=fetch, that results in HEAD not being updated during fetch, to fix it we set remote.origin.mirror=true manually so fetch also updates HEAD
-                await run_async_check('git', '-c', 'remote.origin.mirror=true', '-c', 'fetch.showForcedUpdates=false', '-c', 'advice.fetchShowForcedUpdates=false', 'fetch', 'origin', '+refs/*:refs/*', max_tries=3, cwd=self.path)
-            except:
-                print(f"[gacher] failed to upate '{self.upstream}'")
+            if not self.need_update(time_hot):
                 return
-            self.fetch = time.time()
-            print(f"[gacher] updated '{self.upstream}'")
+            await self.update_inner()
 
-    def stat(self, time_now: float, times: Times) -> RepoStat:
-        lag = time_now - self.fetch
-        if self.lock.locked():
+    def stat(self, times_worker: WorkerTimes) -> RepoStat:
+        times = self.times
+        locked = self.lock.locked()
+        hits = self.hits
+        time_now = time.time()
+        # do not use self any more below, to avoid it being updated behind the
+        # scene and break the values here
+        lag = max(time_now - times.fetch, 0.0)
+        idle = max(time_now - times.access, 0.0)
+        if locked:
             state = RepoState.UPDATING
-        elif lag < times.hot:
+        elif lag < times_worker.hot:
             state = RepoState.HOT
-        elif lag < times.warm:
+        elif lag < times_worker.warm:
             state = RepoState.WARM
         else:
             state = RepoState.COLD
-        idle = time.time() - self.access_time
-        return RepoStat(state, lag, idle, self.access_count)
+        return RepoStat(state, lag, idle, hits)
 
-    def need_update(self, timeout: float) -> bool:
-        return time.time() - self.fetch > timeout
+    @staticmethod
+    def re_data_name():
+        return re.compile(r'[0-9a-f]{16}')
 
-class Repos:
-    path: pathlib.Path
+class WorkerPaths:
+    repos: pathlib.Path
+    data: pathlib.Path
+    links: pathlib.Path
+
+    def __init__(self, repos: str):
+        self.repos = pathlib.Path(repos)
+        self.data = self.repos / 'data'
+        self.links = self.repos / 'links'
+
+class Worker:
+    paths: WorkerPaths
+    times: WorkerTimes
     repos: dict[str, Repo]
     lock: asyncio.Lock
-    times: Times
-    interval: int
-    path_data: pathlib.Path
-    path_links: pathlib.Path
-    match_name: re.Pattern
     redirect: str
 
-    def __init__(self, path: pathlib.Path, times: Times, interval: int, redirect: str):
-        self.path = path
+    def __init__(self, repos: str, times: WorkerTimes, redirect: str):
+        self.paths = WorkerPaths(repos)
+        self.times = times
         self.repos = {}
         self.lock = asyncio.Lock()
-        self.times = times
-        self.interval = interval
-        self.path_data = self.path / 'data'
-        self.path_links = self.path / 'links'
-        self.match_name = re.compile(r'[0-9a-f]{16}')
         self.redirect = redirect
 
-    async def find_or_create_repo(self, upstream: str) -> Repo:
+    async def reset(self):
+        print(f"[gacher] resetting '{self.paths.repos}'")
         async with self.lock:
-            try:
-                repo = self.repos[upstream]
-            except KeyError as e:
-                repo = await Repo.new(upstream, self.path)
-                self.repos[upstream] = repo
+            shutil.rmtree(self.paths.repos)
+            self.repos={}
+            self.paths.repos.mkdir(parents=True)
+            self.paths.data.mkdir()
+            self.paths.links.mkdir()
+
+    async def scan(self):
+        match_name = Repo.re_data_name()
+        print(f"[gacher] scanning '{self.paths.repos}'")
+        async with self.lock:
+            self.repos={}
+            for entry in self.paths.data.glob("*"):
+                if not match_name.match(entry.name):
+                    continue
+                if not entry.is_dir():
+                    continue
+                (status, child_out) = await run_async_check_with_stdout(
+                    'git', 'config', 'remote.origin.url',
+                    cwd=entry
+                )
+                if status:
+                    shutil.rmtree(entry)
+                    continue
+                upstream = child_out.strip().decode('utf-8')
+                key = hash_str_to_bytes(upstream)
+                if key in self.repos:
+                    raise Exception(f"duplicated upstream {upstream}")
+                print(f"[gacher] discovered repo '{entry}' for '{upstream}'")
+                self.repos[key] = await Repo.new(upstream, self.paths.repos)
+
+    async def get_repo(self, upstream: str) -> Repo:
+        key = hash_str_to_bytes(upstream)
+        async with self.lock:
+            if key not in self.repos:
+                self.repos[key] = await Repo.new(upstream, self.paths.repos)
+            repo = self.repos[key]
         return repo
 
     async def update_repo(self, upstream: str):
-        repo = await self.find_or_create_repo(upstream)
+        repo = await self.get_repo(upstream)
         await repo.touch()
-        if not repo.need_update(self.times.hot):
-            print(f"[gacher] serving cached '{upstream}'")
-            return
-        await repo.update()
-
-    async def get_upstreams(self) -> tuple[str]:
-        async with self.lock:
-            upstreams = tuple(self.repos.keys())
-        return upstreams
+        # if not repo.need_update(self.times.hot):
+        #     print(f"[gacher] serving cached '{upstream}'")
+        #     return
+        await repo.update(self.times.hot)
 
     async def routine_worker(self):
+        match_name = Repo.re_data_name()
         while True:
             # drop
             async with self.lock:
@@ -213,12 +328,12 @@ class Repos:
             for (upstream, repo) in items:
                 if repo.lock.locked():
                     continue
-                if time_now - repo.access_time > self.times.drop:
+                if time_now - repo.times.access > self.times.drop:
                     async with self.lock:
                         del self.repos[upstream]
             # remove
-            for entry in self.path_data.glob("*"):
-                if not self.match_name.match(entry.name):
+            for entry in self.paths.data.glob("*"):
+                if not match_name.match(entry.name):
                     continue
                 if not entry.is_dir():
                     continue
@@ -226,7 +341,7 @@ class Repos:
                     continue
                 shutil.rmtree(entry)
             # links
-            for entry in self.path_links.glob("**"):
+            for entry in self.paths.links.glob("**"):
                 if not entry.name.endswith(".git"):
                     continue
                 if not entry.is_symlink():
@@ -239,8 +354,8 @@ class Repos:
                 if repo.lock.locked():
                     continue
                 if repo.need_update(self.times.warm):
-                    await repo.update()
-            await asyncio.sleep(self.interval)
+                    await repo.update(self.times.hot)
+            await asyncio.sleep(self.times.interval)
 
     async def stat(self) -> dict[str, RepoStat]:
         stat = {}
@@ -249,38 +364,6 @@ class Repos:
             for repo in self.repos.values():
                 stat[repo.upstream] = dataclasses.asdict(repo.stat(time_now, self.times))
         return stat
-
-    async def scan(self):
-        print(f"[gacher] scanning '{self.path}'")
-        async with self.lock:
-            self.repos={}
-            for entry in self.path_data.glob("*"):
-                if not self.match_name.match(entry.name):
-                    continue
-                if not entry.is_dir():
-                    continue
-                proc = await asyncio.create_subprocess_exec(
-                    'git', 'config', 'remote.origin.url',
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
-                    cwd=entry
-                )
-                await proc.wait()
-                if proc.returncode != 0:
-                    shutil.rmtree(entry)
-                    continue
-                upstream = (await proc.stdout.read()).decode('utf-8').strip()
-                print(f"[gacher] discovered existing repo '{entry}' for '{upstream}'")
-                self.repos[upstream] = await Repo.new(upstream, self.path)
-
-    async def reset(self):
-        print(f"[gacher] resetting '{self.path}'")
-        async with self.lock:
-            shutil.rmtree(self.path)
-            self.repos={}
-            self.path.mkdir(parents=True)
-            (self.path / 'data').mkdir()
-            (self.path / 'links').mkdir()
 
 def is_ip(ip: str) -> bool:
     try:
@@ -326,16 +409,16 @@ async def route_cache(request):
     else:
         scheme = 'https://'
     upstream = f"{scheme}{host}/{path}"
-    await repos.update_repo(upstream)
-    if repos.redirect:
-        redirect = f"{repos.redirect}{upstream_redirectable}{tail}?{request.query_string}"
+    await worker.update_repo(upstream)
+    if worker.redirect:
+        redirect = f"{worker.redirect}{upstream_redirectable}{tail}?{request.query_string}"
         print(f"[gacher] redirecting to '{redirect}'")
         return web.HTTPMovedPermanently(redirect)
     response = web.StreamResponse()
     env = {
         "CONTENT_TYPE": request.headers.get('Content-Type', ''),
         "REQUEST_METHOD": request.method,
-        "PATH_INFO": f"/{Repo.calculate_relative_path_data(upstream)}{tail}",
+        "PATH_INFO": f"/{RepoPaths.calculate_relative_data(upstream)}{tail}",
         "QUERY_STRING": request.query_string,
         "GIT_HTTP_EXPORT_ALL": "",
         "GIT_PROJECT_ROOT": "."
@@ -346,7 +429,7 @@ async def route_cache(request):
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             env=env,
-            cwd=repos.path
+            cwd=worker.paths.repos
         )
         proc.stdin.write(await request.read())
         await proc.stdin.drain()
@@ -358,7 +441,7 @@ async def route_cache(request):
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             env=env,
-            cwd=repos.path
+            cwd=worker.paths.repos
         )
     end_header = False
     buffer_all = bytearray()
@@ -440,15 +523,15 @@ if __name__ == '__main__':
     if args.time_warm <= args.time_hot:
         raise ValueError("time_warm must be longer than time_hot")
 
-    repos = Repos(pathlib.Path(args.repos), Times(args.time_hot, args.time_warm, args.time_drop, args.time_remove), args.interval, args.redirect)
+    worker = Worker(args.repos, WorkerTimes(args.time_hot, args.time_warm, args.time_drop, args.time_remove, args.interval), args.redirect)
 
     async def on_startup(app):
         if args.reset:
-            await repos.reset()
+            await worker.reset()
         else:
-            await repos.scan()
+            await worker.scan()
         routine_worker = web.AppKey("routine_worker", asyncio.Task)
-        app[routine_worker] = asyncio.create_task(repos.routine_worker())
+        app[routine_worker] = asyncio.create_task(worker.routine_worker())
 
     app = web.Application()
     app.on_startup.append(on_startup)
