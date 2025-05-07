@@ -4,18 +4,12 @@ gacher is a simple read-only git caching server: fetching through gacher server 
 
 ## Usage
 
+### Server
 Just execute the main script `gacher.py`
 
 ```
 ./gacher.py
 ```
-
-By default the server binds to `http://0.0.0.0:8080`, to use the cache fetch an upstream through the `/cache` route with corresponding path, e.g.:
-```
-git clone http://127.0.0.1:8080/cache/github.com/7Ji/gacher.git
-```
-
-gacher would figure out the upstream `https://github.com/7Ji/gacher.git`, fetch from it with `git` if it does not exist locally at `./repos/data/[hash of upsteam]` or is not new enough, then serve from the local cache `./repos/data/[hash of upstream]` by calling `git-http-backend` as a CGI and bridge the connection.
 
 The script also supports advanced config from command line:
 
@@ -37,6 +31,15 @@ Supported arguments are:
 - `--time-remove TIME_REMOVE` time in seconds after which a unmanaged repo shall be removed/deleted (default: `604800`)
 - `--interval INTERVAL` time interval in seconds to perform routine check and act accordingly to `{time_warm}`, `{time_drop}` and `{time_remove}` (default: `1`)
 - `--redirect REDIRECT` instead of serving the cached repos directly by ourselves, return 301 redirect to such address, useful if you combine gacher with a web frontend, e.g. cgit, it is recommended to use `{repos}`/links as its root in that case (default: )
+
+### Client
+
+By default the server binds to `http://0.0.0.0:8080`, to use the cache fetch an upstream through the `/cache` route with corresponding path, e.g.:
+```
+git clone http://127.0.0.1:8080/cache/github.com/7Ji/gacher.git
+```
+
+gacher would figure out the upstream `https://github.com/7Ji/gacher.git`, fetch from it with `git` if it does not exist locally at `./repos/data/[hash of upsteam]` or is not new enough, then serve from the local cache `./repos/data/[hash of upstream]` by calling `git-http-backend` as a CGI and bridge the connection.
 
 ## Routes / API
 
@@ -94,19 +97,17 @@ server {
     listen       80;
     listen       [::]:80;
     server_name  gacher.lan;
-    root         /usr/share/webapps/cgit;
-    try_files    $uri @cgit;
-    access_log /var/log/nginx/gacher.access.log;
+    access_log   /var/log/nginx/gacher.lan.access.log;
 
-    location ^~ /cache {
-        proxy_pass http://127.0.0.1:19418/cache;
-        proxy_buffering off;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-Port $server_port;
+    location ~ ^/cache/(.*)$ {
+        return 301 http://$server_name:19418/cache/$1$is_args$args;
     }
-        
-    location ~ /.+\.git/(info/refs|git-upload-pack).* {
+
+    location ~ ^/(stat|help)$ {
+        return 301 http://$server_name:19418/$1;
+    }
+
+    location ~ ^/.+\.git/(HEAD|info/refs|git-upload-pack)$ {
         include             fastcgi_params;
         fastcgi_param       SCRIPT_FILENAME     /usr/lib/git-core/git-http-backend;
         fastcgi_param       PATH_INFO           $uri;
@@ -115,6 +116,11 @@ server {
         fastcgi_pass        unix:/run/fcgiwrap.sock;
         fastcgi_read_timeout 3600;
         client_max_body_size 50m;
+    }
+
+    location / {
+        root         /usr/share/webapps/cgit;
+        try_files    $uri @cgit;
     }
 
     location @cgit {
