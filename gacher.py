@@ -488,6 +488,9 @@ if __name__ == '__main__':
 
         return response
 
+    async def route_uncachable(request):
+        return web.Response(status=403, text="uncachable access")
+
     async def route_stat(request):
         return web.json_response(await worker.stat())
 
@@ -533,6 +536,7 @@ if __name__ == '__main__':
 
     app.add_routes([
         web.route('*', r'/cache/{scheme:((https?|git)://)?}{host}/{path:.+}/{service:(HEAD|info/refs|git-upload-pack)}', route_cache),
+        web.route('*', r'/cache/{anything:.*}', route_uncachable),
         web.get("/stat", route_stat),
         web.route('*', '/help', route_help),
         web.route('*', r'/{upstream:.*}', route_root)
