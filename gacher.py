@@ -280,7 +280,7 @@ class Worker:
                     continue
                 if not entry.is_dir():
                     continue
-                if time.time() - (entry / "config").stat().st_mtime > self.times.remove:
+                if time.time() - (entry / "config").stat().st_mtime > self.times.drop:
                     continue
                 (status, child_out) = await run_async_check_with_stdout(
                     'git', 'config', 'remote.origin.url',
