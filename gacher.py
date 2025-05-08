@@ -185,7 +185,7 @@ class Repo:
         return time.time() - self.times.fetch > time_hot
 
     # this is only called in update(), lock was aquired there
-    async def update_inner(self):
+    async def update_inner(self) -> WorkStatus:
         print(f"[gacher] updating '{self.upstream}'")
         # git complains if remote origin was added with --mirror without =fetch
         # or =push, so we added it with --mirror=fetch, that results in HEAD not
@@ -202,17 +202,18 @@ class Repo:
             cwd=self.paths.data
         ):
             print(f"[gacher] failed to upate '{self.upstream}'")
-            return
+            return WorkStatus.BAD
         self.times.fetch = time.time()
         print(f"[gacher] updated '{self.upstream}'")
+        return WorkStatus.OK
 
-    async def update(self, time_hot: float):
+    async def update(self, time_hot: float) -> WorkStatus:
         if not self.need_update(time_hot):
-            return
+            return WorkStatus.OK
         async with self.lock:
             if not self.need_update(time_hot):
-                return
-            await self.update_inner()
+                return WorkStatus.OK
+            return await self.update_inner()
 
     def stat(self, times_worker: WorkerTimes) -> RepoStat:
         times = self.times
@@ -296,71 +297,87 @@ class Worker:
                 print(f"[gacher] discovered repo '{entry}' for '{upstream}'")
                 self.repos[key] = await Repo.new(upstream, self.paths.repos)
 
-    async def get_repo(self, upstream: str) -> Repo:
+    async def cache_repo(self, upstream: str) -> WorkStatus:
         key = hash_str_to_bytes(upstream)
+        must_update = False
         async with self.lock:
             if key not in self.repos:
                 self.repos[key] = await Repo.new(upstream, self.paths.repos)
+                must_update = True
             repo = self.repos[key]
-        return repo
-
-    async def update_repo(self, upstream: str):
-        repo = await self.get_repo(upstream)
         await repo.hit()
-        await repo.update(self.times.hot)
+        update_failed = await repo.update(self.times.hot)
+        if must_update and update_failed:
+            async with self.lock:
+                print(f"[gacher] initial update of '{upstream}' failed, removing")
+                del self.repos[key]
+                shutil.rmtree(repo.paths.data)
+                return WorkStatus.BAD
+        return WorkStatus.OK
 
     async def routine_worker(self):
         match_name = Repo.re_data_name()
+        step = 0
         while True:
-            # drop
-            async with self.lock:
-                items = tuple(self.repos.items())
-            keys = set(item[0] for item in items)
-            time_now = time.time()
-            for (key, repo) in items:
-                if repo.lock.locked():
-                    continue
-                if time_now - repo.times.access > self.times.drop:
-                    print(f"[gacher] dropping '{repo.upstream}' from run-time cache, the on-disk cache is kept in place")
+            match step:
+                # drop
+                case 0:
                     async with self.lock:
-                        del self.repos[key]
-            # remove
-            for entry in self.paths.data.glob("*"):
-                if not match_name.match(entry.name):
-                    continue
-                if entry.name in keys:
-                    continue
-                if not entry.is_dir():
-                    continue
-                if time.time() - (entry / "config").stat().st_mtime <= self.times.remove:
-                    continue
-                print(f"[gacher] removing '{entry}' from disk")
-                shutil.rmtree(entry)
-            # links
-            removed = True
-            while removed:
-                removed = False
-                for entry in self.paths.links.glob("**"):
-                    if entry.is_symlink():
-                        if entry.exists():
+                        items = tuple(self.repos.items())
+                    keys = set(item[0] for item in items)
+                    time_now = time.time()
+                    for (key, repo) in items:
+                        if repo.lock.locked():
                             continue
-                        try:
-                            entry.unlink()
-                            print(f"[gacher] removed dead symlink '{entry}'")
-                        except:
-                            pass
-                    elif entry.is_dir():
-                        try:
-                            entry.rmdir()
-                            print(f"[gacher] removed empty dir '{entry}'")
-                        except:
-                            pass
-
-            # update
-            for repo in tuple(self.repos.values()):
-                if repo.lock.locked():
-                    continue
-                await repo.update(self.times.warm)
+                        if time_now - repo.times.access > self.times.drop:
+                            print(f"[gacher] dropping '{repo.upstream}' from run-time cache, the on-disk cache is kept in place")
+                            async with self.lock:
+                                del self.repos[key]
+                    step += 1
+                # remove
+                case 1:
+                    for entry in self.paths.data.glob("*"):
+                        if not match_name.match(entry.name):
+                            continue
+                        if entry.name in keys:
+                            continue
+                        if not entry.is_dir():
+                            continue
+                        if time.time() - (entry / "config").stat().st_mtime <= self.times.remove:
+                            continue
+                        print(f"[gacher] removing '{entry}' from disk")
+                        shutil.rmtree(entry)
+                    step += 1
+                # links
+                case 2:
+                    removed = True
+                    while removed:
+                        removed = False
+                        for entry in self.paths.links.glob("**"):
+                            if entry.is_symlink():
+                                if entry.exists():
+                                    continue
+                                try:
+                                    entry.unlink()
+                                    print(f"[gacher] removed dead symlink '{entry}'")
+                                    removed = True
+                                except:
+                                    pass
+                            elif entry.is_dir():
+                                try:
+                                    entry.rmdir()
+                                    print(f"[gacher] removed empty dir '{entry}'")
+                                    removed = True
+                                except:
+                                    pass
+                    step += 1
+                # update
+                case _:
+                    for repo in tuple(self.repos.values()):
+                        if repo.lock.locked():
+                            continue
+                        await repo.update(self.times.warm)
+                    step = 0
             await asyncio.sleep(self.times.interval)
 
     async def stat(self) -> dict[str, RepoStat]:
@@ -431,7 +448,8 @@ if __name__ == '__main__':
             return web.Response(status=403, text="no valid git service")
 
         upstream = f"{scheme}{host}/{path}"
-        await worker.update_repo(upstream)
+        if await worker.cache_repo(upstream):
+            return web.Response(status=500, text="failed to cache upstream")
 
         if worker.redirect:
             redirect = f"{worker.redirect}{host}/{path}/{service}?{request.query_string}"
