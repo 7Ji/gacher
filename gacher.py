@@ -324,7 +324,6 @@ class Worker:
                 case 0:
                     async with self.lock:
                         items = tuple(self.repos.items())
-                    keys = set(item[0] for item in items)
                     time_now = time.time()
                     for (key, repo) in items:
                         if repo.lock.locked():
@@ -333,9 +332,12 @@ class Worker:
                             print(f"[gacher] dropping '{repo.upstream}' from run-time cache, the on-disk cache is kept in place")
                             async with self.lock:
                                 del self.repos[key]
+                    del items
                     step += 1
                 # remove
                 case 1:
+                    async with self.lock:
+                        keys = tuple(self.repos.keys())
                     for entry in self.paths.data.glob("*"):
                         if not match_name.match(entry.name):
                             continue
@@ -347,6 +349,7 @@ class Worker:
                             continue
                         print(f"[gacher] removing '{entry}' from disk")
                         shutil.rmtree(entry)
+                    del keys
                     step += 1
                 # links
                 case 2:
