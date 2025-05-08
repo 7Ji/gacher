@@ -34,12 +34,39 @@ Supported arguments are:
 
 ### Client
 
+#### Simple
+
 By default the server binds to `http://0.0.0.0:8080`, to use the cache fetch an upstream through the `/cache` route with corresponding path, e.g.:
 ```
 git clone http://127.0.0.1:8080/cache/github.com/7Ji/gacher.git
 ```
 
 gacher would figure out the upstream `https://github.com/7Ji/gacher.git`, fetch from it with `git` if it does not exist locally at `./repos/data/[hash of upsteam]` or is not new enough, then serve from the local cache `./repos/data/[hash of upstream]` by calling `git-http-backend` as a CGI and bridge the connection.
+
+Note you can also specify the upstream scheme explicitly, e.g.:
+```
+git clone http://127.0.0.1:8080/cache/git://git.openwrt.org/openwrt/openwrt.git
+```
+
+In this case gacher uses `git://git.openwrt.org/openwrt/openwrt.git` as upstream directly, you can thus specify schemes like `git://` that's not used in auto-scheme logic.
+
+
+#### Advanced: auto URL override
+
+If you find writing prefix e.g. `http://127.0.0.1:8080/cache/` tedious and you want a transparent experience, you could configure a local git `url.insteadOf` config, e.g.:
+
+```
+git config --global url.http://127.0.0.1/cache/.insteadOf https://
+```
+
+You could also use it as one-time config instead of storing it globally, e.g.:
+
+```
+git -c url.http://127.0.0.1/cache/.insteadOf https:// clone [upstream url]
+```
+
+With this config, `git clone https://github.com/7Ji/gacher.git` automatically becomes `git clone http://127.0.0.1:8080/cache/github.com/7Ji/gacher.git`, your git clients fetches from gacher and gacher fetches from upstream then serves the local cache to you.
+
 
 ## Routes / API
 
@@ -68,22 +95,6 @@ gacher can be used as a standalone server application, or used in combination wi
 ### Standalone
 
 Just run `./gacher.py`, access to cache go through `http://[host]:8080/cache`, cached repos are served by `git-http-backend` called by gacher itself
-
-### Client auto URL override
-
-If you find writing prefix e.g. `http://127.0.0.1:8080/cache/` tedious and you want a transparent experience, you could configure a local git `url.insteadOf` config, e.g.:
-
-```
-git config --global url.http://127.0.0.1/cache/.insteadOf https://
-```
-
-You could also use it as one-time config instead of storing it globally, e.g.:
-
-```
-git -c url.http://127.0.0.1/cache/.insteadOf https:// clone [upstream url]
-```
-
-With this config, `git clone https://github.com/7Ji/gacher.git` automatically becomes `git clone http://127.0.0.1:8080/cache/github.com/7Ji/gacher.git`, your git clients fetches from gacher and gacher fetches from upstream then serves the local cache to you.
 
 ### With nginx and cgit
 
@@ -125,6 +136,17 @@ server {
         fastcgi_pass            unix:/run/fcgiwrap.sock;
     }
 }
+```
+
+Remember to also configure `merge_slashes off;` for nginx if you want to use explicit scheme in `cache`  request, so e.g. `git clone http://gacher.lan/cache/https://github.com/7Ji/ampart.git` would not be rewritten to `git clone http://gacher.lan:19418/cache/https:/github.com/7Ji/ampart.git`:
+
+```
+http {
+    # ...
+    merge_slashes off;
+    # ...
+}
+
 ```
 
 Configure cgit with the following `/etc/cgitrc`:
