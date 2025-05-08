@@ -535,7 +535,7 @@ if __name__ == '__main__':
         route_root = route_help
 
     app.add_routes([
-        web.route('*', r'/cache/{scheme:((https?|git)://)?}{host}/{path:.+}/{service:(HEAD|info/refs|git-upload-pack)}', route_cache),
+        web.route('*', r'/cache/{scheme:((https?|git)://)?}{host:[^/]+[^:/]}/{path:.+}/{service:(HEAD|info/refs|git-upload-pack)}', route_cache),
         web.route('*', r'/cache/{anything:.*}', route_uncachable),
         web.get("/stat", route_stat),
         web.route('*', '/help', route_help),
