@@ -142,6 +142,11 @@ class WorkerTimes:
     cold: int
     interval: int
 
+class UpdateReason(int, enum.Enum):
+    INITIAL = 0
+    ROUTINE = 1
+    REQUEST = 2
+
 class Repo:
     upstream: str
     paths: RepoPaths
@@ -194,9 +199,15 @@ class Repo:
             self.paths.config.touch()
             self.hits += 1
 
-    def need_update(self, times: WorkerTimes) -> bool:
-        time_now = time.time()
-        return time_now - self.times.access <= times.warm and time_now - self.times.fetch > times.hot
+    def need_update(self, times: WorkerTimes, reason: UpdateReason) -> bool:
+        match reason:
+            case UpdateReason.INITIAL:
+                return True
+            case UpdateReason.ROUTINE:
+                time_now = time.time()
+                return min(time_now - self.times.access, time_now - self.times.fetch) > times.warm
+            case UpdateReason.REQUEST:
+                return time.time() - self.times.fetch > times.hot
 
     # this is only called in update(), lock was aquired there
     async def update_inner(self) -> WorkStatus:
@@ -221,11 +232,11 @@ class Repo:
         print(f"[gacher] updated '{self.upstream}'")
         return WorkStatus.OK
 
-    async def update(self, times: WorkerTimes) -> WorkStatus:
-        if not self.need_update(times):
+    async def update(self, times: WorkerTimes, reason: UpdateReason) -> WorkStatus:
+        if not self.need_update(times, reason):
             return WorkStatus.OK
         async with self.lock:
-            if not self.need_update(times):
+            if not self.need_update(times, reason):
                 return WorkStatus.OK
             return await self.update_inner()
 
@@ -313,15 +324,16 @@ class Worker:
 
     async def cache_repo(self, upstream: str) -> WorkStatus:
         key = hash_str_to_str(upstream)
-        must_update = False
         async with self.lock:
-            if key not in self.repos:
+            if key in self.repos:
+                reason = UpdateReason.INITIAL
+            else:
                 self.repos[key] = await Repo.new(upstream, self.paths.repos)
-                must_update = True
+                reason = UpdateReason.REQUEST
             repo = self.repos[key]
         await repo.hit()
-        update_failed = await repo.update(self.times)
-        if must_update and update_failed:
+        update_failed = await repo.update(self.times, reason)
+        if reason == UpdateReason.INITIAL and update_failed:
             async with self.lock:
                 print(f"[gacher] initial update of '{upstream}' failed, removing")
                 del self.repos[key]
@@ -401,7 +413,7 @@ class Worker:
                     for repo in tuple(self.repos.values()):
                         if repo.lock.locked():
                             continue
-                        await repo.update(self.times)
+                        await repo.update(self.times, UpdateReason.ROUTINE)
                     step = 0
             await asyncio.sleep(self.times.interval)
 
