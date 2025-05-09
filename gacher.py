@@ -30,6 +30,7 @@ import pathlib
 import shutil
 import textwrap
 import time
+import typing
 from urllib.parse import urlparse
 import xxhash
 
@@ -391,17 +392,66 @@ class Worker:
             stat[repo.upstream] = dataclasses.asdict(repo.stat(self.times))
         return stat
 
-def scheme_from_host(host: str) -> str:
-    hostname = urlparse(f"http://{host}").hostname
-    try:
-        ipaddress.ip_address(hostname)
-        return 'http://'
-    except:
-        pass
-    splitted = hostname.rsplit('.', 1)
-    if len(splitted) == 1 or splitted[1] == 'lan' or splitted[1] == 'local':
-        return 'http://'
-    return "https://"
+@dataclasses.dataclass
+class CacheInfo:
+    upstream: str
+    relative: str
+    scheme: str
+    host: str
+    path: str
+    service: str
+
+    @staticmethod
+    def scheme_from_host(host: str) -> str:
+        hostname = urlparse(f"http://{host}").hostname
+        try:
+            ipaddress.ip_address(hostname)
+            return 'http://'
+        except:
+            pass
+        splitted = hostname.rsplit('.', 1)
+        if len(splitted) == 1 or splitted[1] == 'lan' or splitted[1] == 'local':
+            return 'http://'
+        return "https://"
+
+    @classmethod
+    def new(cls, request) -> (typing.Self, web.Response):
+        scheme = request.match_info['scheme']
+        host = request.match_info['host']
+        path = request.match_info['path']
+        service = request.match_info['service']
+        if scheme:
+            if not host:
+                host = ''
+            if not path:
+                path = ''
+            if not service:
+                service = ''
+        else:
+            if host:
+                host = host.lower()
+            else:
+                return (None, web.Response(status=403, text="empty host in implicit cache request"))
+            scheme = cls.scheme_from_host(host)
+            if not path:
+                return (None, web.Response(status=403, text="no cachable path in implicit cache request"))
+            if not path.endswith('.git'):
+                path += '.git'
+            if not service:
+                return (None, web.Response(status=403, text="no valid git service"))
+        match request.method:
+            case 'POST':
+                match service:
+                    case 'git-upload-pack' | 'git-upload-archive' | 'git-receive-pack':
+                        pass
+                    case _:
+                        return (None, web.Response(status=403, text="invalid POST service"))
+                pass
+            case 'GET':
+                pass
+            case _:
+                return (None, web.Response(status=403, text="invalid request method"))
+        return (cls(f"{scheme}{host}/{path}", f"{host}/{path}/{service}?{request.query_string}", scheme, host, path, service), None)
 
 def response_bad_method(path: str, method: str, required: str):
     text = f"method {method} to {path} not allowed, allowing {required}"
@@ -438,28 +488,15 @@ if __name__ == '__main__':
     worker = Worker(args.repos, WorkerTimes(args.time_hot, args.time_warm, args.time_drop, args.time_remove, args.interval), args.redirect)
 
     async def route_cache(request):
-        report_access(request, 'cache')
-        scheme = request.match_info['scheme']
-        host = request.match_info['host']
-        if not host:
-            return web.Response(status=403, text="empty host in request")
-        if not scheme:
-            scheme = scheme_from_host(host)
-        path = request.match_info['path']
-        if not path:
-            return web.Response(status=403, text="no cachable path")
-        if not path.endswith(".git"):
-            path += ".git"
-        service = request.match_info['service']
-        if not service:
-            return web.Response(status=403, text="no valid git service")
+        cache_info, response = CacheInfo.new(request)
+        if response:
+            return response
 
-        upstream = f"{scheme}{host}/{path}"
-        if await worker.cache_repo(upstream):
+        if await worker.cache_repo(cache_info.upstream):
             return web.Response(status=500, text="failed to cache upstream")
 
         if worker.redirect:
-            redirect = f"{worker.redirect}{host}/{path}/{service}?{request.query_string}"
+            redirect = f"{worker.redirect}{cache_info.relative}"
             print(f"[gacher] redirecting to '{redirect}'")
             return web.HTTPMovedPermanently(redirect)
 
@@ -467,7 +504,7 @@ if __name__ == '__main__':
         env = {
             "CONTENT_TYPE": request.headers.get('Content-Type', ''),
             "REQUEST_METHOD": request.method,
-            "PATH_INFO": f"/{RepoPaths.calculate_relative_data(upstream)}/{service}",
+            "PATH_INFO": f"/{RepoPaths.calculate_relative_data(cache_info.upstream)}/{cache_info.service}",
             "QUERY_STRING": request.query_string,
             "GIT_HTTP_EXPORT_ALL": "",
             "GIT_PROJECT_ROOT": "."
@@ -511,6 +548,12 @@ if __name__ == '__main__':
         await response.write_eof()
 
         return response
+
+    async def route_cache_get(request):
+        return await route_cache(request)
+
+    async def route_cache_post(request):
+        return await route_cache(request)
 
     async def route_uncachable(request):
         report_access(request, 'uncachable')
@@ -562,8 +605,10 @@ if __name__ == '__main__':
     else:
         route_root = route_help
 
+    cache_prefix = r'/cache/{scheme:((https?|git)://)?}{host:[^/]+[^:/]}/{path:.+}/'
     app.add_routes([
-        web.route('*', r'/cache/{scheme:((https?|git)://)?}{host:[^/]+[^:/]}/{path:.+}/{service:(HEAD|info/refs|objects/(info/((http-)?alternates|packs)|[0-9a-f]{2}/([0-9a-f]{38}|[0-9a-f]{62})|pack/pack-([0-9a-f]{40}|[0-9a-f]{64})\.(pack|idx))|git-upload-pack|git-upload-archive|git-receive-pack)}', route_cache),
+        web.get(cache_prefix + r'{service:(HEAD|info/refs|objects/(info/((http-)?alternates|packs)|[0-9a-f]{2}/([0-9a-f]{38}|[0-9a-f]{62})|pack/pack-([0-9a-f]{40}|[0-9a-f]{64})\.(pack|idx)))}', route_cache_get),
+        web.post(cache_prefix + r'{service:(git-upload-pack|git-upload-archive|git-receive-pack)}', route_cache_post),
         web.route('*', r'/cache/{anything:.*}', route_uncachable),
         web.get("/stat", route_stat),
         web.route('*', '/help', route_help),
