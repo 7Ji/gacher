@@ -556,7 +556,7 @@ if __name__ == '__main__':
         route_root = route_help
 
     app.add_routes([
-        web.route('*', r'/cache/{scheme:((https?|git)://)?}{host:[^/]+[^:/]}/{path:.+}/{service:(HEAD|info/refs|git-upload-pack)}', route_cache),
+        web.route('*', r'/cache/{scheme:((https?|git)://)?}{host:[^/]+[^:/]}/{path:.+}/{service:(HEAD|info/refs|objects/(info/((http-)?alternates|packs)|[0-9a-f]{2}/([0-9a-f]{38}|[0-9a-f]{62})|pack/pack-([0-9a-f]{40}|[0-9a-f]{64})\.(pack|idx))|git-upload-pack|git-upload-archive|git-receive-pack)}', route_cache),
         web.route('*', r'/cache/{anything:.*}', route_uncachable),
         web.get("/stat", route_stat),
         web.route('*', '/help', route_help),
