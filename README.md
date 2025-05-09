@@ -112,7 +112,7 @@ server {
 
     rewrite ^/(stat|help|cache/.*)$ http://$server_name:19418/$1 permanent;
 
-    location ~ ^/.+\.git/(HEAD|info/refs|git-upload-pack)$ {
+    location ~ '^/.+\.git/(HEAD|info/refs|objects/(info/((http-)?alternates|packs)|[0-9a-f]{2}/([0-9a-f]{38}|[0-9a-f]{62})|pack/pack-([0-9a-f]{40}|[0-9a-f]{64})\.(pack|idx))|git-upload-pack|git-upload-archive|git-receive-pack)$' {
         include                 fastcgi_params;
         fastcgi_param           SCRIPT_FILENAME     /usr/lib/git-core/git-http-backend;
         fastcgi_param           PATH_INFO           $uri;
