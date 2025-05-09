@@ -451,7 +451,17 @@ class CacheInfo:
                 pass
             case _:
                 return (None, web.Response(status=403, text="invalid request method"))
-        return (cls(f"{scheme}{host}/{path}", f"{host}/{path}/{service}?{request.query_string}", scheme, host, path, service), None)
+        return (cls(f"{scheme}{host}/{path}", f"{host}/{path}/{service}{'?' if request.query_string else ''}{request.query_string}", scheme, host, path, service), None)
+
+    def env(self, request) -> dict:
+        return {
+            "CONTENT_TYPE": request.headers.get('Content-Type', ''),
+            "REQUEST_METHOD": request.method,
+            "PATH_INFO": f"/{RepoPaths.calculate_relative_data(self.upstream)}/{self.service}",
+            "QUERY_STRING": request.query_string,
+            "GIT_HTTP_EXPORT_ALL": "",
+            "GIT_PROJECT_ROOT": "."
+        }
 
 def response_bad_method(path: str, method: str, required: str):
     text = f"method {method} to {path} not allowed, allowing {required}"
@@ -487,33 +497,41 @@ if __name__ == '__main__':
 
     worker = Worker(args.repos, WorkerTimes(args.time_hot, args.time_warm, args.time_drop, args.time_remove, args.interval), args.redirect)
 
-
-    async def route_cache_prepare(request) -> (web.Response, dict):
+    async def route_cache(request):
+        report_access(request, 'cache')
         cache_info, response = CacheInfo.new(request)
-        if response:
-            return (response, None)
-
+        if response is not None:
+            return response
         if await worker.cache_repo(cache_info.upstream):
-            return (web.Response(status=500, text="failed to cache upstream"), None)
-
+            return web.Response(status=500, text="failed to cache upstream")
         if worker.redirect:
             redirect = f"{worker.redirect}{cache_info.relative}"
             print(f"[gacher] redirecting to '{redirect}'")
-            return (web.HTTPMovedPermanently(redirect), None)
+            return web.HTTPMovedPermanently(redirect)
 
-        return (
-            None,
-            {
-                "CONTENT_TYPE": request.headers.get('Content-Type', ''),
-                "REQUEST_METHOD": request.method,
-                "PATH_INFO": f"/{RepoPaths.calculate_relative_data(cache_info.upstream)}/{cache_info.service}",
-                "QUERY_STRING": request.query_string,
-                "GIT_HTTP_EXPORT_ALL": "",
-                "GIT_PROJECT_ROOT": "."
-            }
-        )
-
-    async def route_cache_end(request, proc) -> web.Response:
+        match request.method:
+            case 'GET':
+                proc = await asyncio.create_subprocess_exec(
+                    'git', 'http-backend',
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    env=cache_info.env(request),
+                    cwd=worker.paths.repos
+                )
+            case 'POST':
+                proc = await asyncio.create_subprocess_exec(
+                    'git', 'http-backend',
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    env=cache_info.env(request),
+                    cwd=worker.paths.repos
+                )
+                proc.stdin.write(await request.read())
+                await proc.stdin.drain()
+                proc.stdin.close()
+                await proc.stdin.wait_closed()
+            case _:
+                return web.Response(status=403, text="invalid method to cache route")
         response = web.StreamResponse()
         for line in (await proc.stdout.readuntil(b'\r\n\r\n'))[:-4].split(b'\r\n'):
             if len(line) == 0:
@@ -534,38 +552,6 @@ if __name__ == '__main__':
         await response.write_eof()
 
         return response
-
-    async def route_cache_get(request):
-        report_access(request, 'cache(get)')
-        response, env = await route_cache_prepare(request)
-        if response:
-            return response
-        proc = await asyncio.create_subprocess_exec(
-            'git', 'http-backend',
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=worker.paths.repos
-        )
-        return await route_cache_end(request, proc)
-
-    async def route_cache_post(request):
-        report_access(request, 'cache(post)')
-        response, env = await route_cache_prepare(request)
-        if response:
-            return response
-        proc = await asyncio.create_subprocess_exec(
-            'git', 'http-backend',
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=worker.paths.repos
-        )
-        proc.stdin.write(await request.read())
-        await proc.stdin.drain()
-        proc.stdin.close()
-        await proc.stdin.wait_closed()
-        return await route_cache_end(request, proc)
 
     async def route_uncachable(request):
         report_access(request, 'uncachable')
@@ -619,8 +605,8 @@ if __name__ == '__main__':
 
     cache_prefix = r'/cache/{scheme:((https?|git)://)?}{host:[^/]+[^:/]}/{path:.+}/'
     app.add_routes([
-        web.get(cache_prefix + r'{service:(HEAD|info/refs|objects/(info/((http-)?alternates|packs)|[0-9a-f]{2}/([0-9a-f]{38}|[0-9a-f]{62})|pack/pack-([0-9a-f]{40}|[0-9a-f]{64})\.(pack|idx)))}', route_cache_get),
-        web.post(cache_prefix + r'{service:(git-upload-pack|git-upload-archive|git-receive-pack)}', route_cache_post),
+        web.get(cache_prefix + r'{service:(HEAD|info/refs|objects/(info/((http-)?alternates|packs)|[0-9a-f]{2}/([0-9a-f]{38}|[0-9a-f]{62})|pack/pack-([0-9a-f]{40}|[0-9a-f]{64})\.(pack|idx)))}', route_cache),
+        web.post(cache_prefix + r'{service:(git-upload-pack|git-upload-archive|git-receive-pack)}', route_cache),
         web.route('*', r'/cache/{anything:.*}', route_uncachable),
         web.get("/stat", route_stat),
         web.route('*', '/help', route_help),
