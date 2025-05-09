@@ -16,6 +16,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import aiofiles
 from aiohttp import web
 import argparse
 import asyncio
@@ -52,14 +53,30 @@ async def run_async_check(program, *args, max_tries=1, **kwds) -> WorkStatus:
     print(f"[gacher] child {program} {args} failed after {max_tries} tries")
     return WorkStatus.BAD
 
+# outer caller should await
+def prepare_to_run_async_with_pipe_out(program, *args, max_tries=1, **kwds):
+    return asyncio.create_subprocess_exec(
+        program, *args,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        **kwds
+    )
+
+# outer caller should await
+def prepare_to_run_async_with_pipe_in_out(program, *args, max_tries=1, **kwds):
+    return asyncio.create_subprocess_exec(
+        program, *args,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        **kwds
+    )
+
 async def run_async_check_with_stdout(
     program, *args, max_tries=1, **kwds
 ) -> (WorkStatus, bytes):
     for _ in range(max_tries):
-        proc = await asyncio.create_subprocess_exec(
+        proc = await prepare_to_run_async_with_pipe_out(
             program, *args,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
             **kwds
         )
         await proc.wait()
@@ -392,6 +409,9 @@ class Worker:
             stat[repo.upstream] = dataclasses.asdict(repo.stat(self.times))
         return stat
 
+    def data_of_upstream(self, upstream: str) -> pathlib.Path:
+        return self.paths.repos / RepoPaths.calculate_relative_data(upstream)
+
 @dataclasses.dataclass
 class CacheInfo:
     upstream: str
@@ -470,6 +490,23 @@ def response_bad_method(path: str, method: str, required: str):
 def report_access(request, route: str):
     print(f"[gacher] route {route}: '{request.headers.get('X-Forwarded-Host', request.remote)}' -> {request.method} -> '{request.rel_url}'")
 
+
+async def proc_to_response(proc, response):
+    while True:
+        buffer = await proc.stdout.read(0x100000)
+        if not buffer:
+            break
+        await response.write(buffer)
+
+    await proc.wait()
+    await response.write_eof()
+
+async def request_to_proc(request, proc):
+    proc.stdin.write(await request.read())
+    await proc.stdin.drain()
+    proc.stdin.close()
+    await proc.stdin.wait_closed()
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
                     prog='gacher',
@@ -511,27 +548,54 @@ if __name__ == '__main__':
 
         match request.method:
             case 'GET':
-                proc = await asyncio.create_subprocess_exec(
+                match cache_info.service:
+                    case 'HEAD':
+                        async with aiofiles.open(worker.data_of_upstream(cache_info.upstream) / 'HEAD', 'rb') as f:
+                            body = await f.read()
+                        return web.Response(body = body, content_type='text/plain')
+                    case 'info/refs':
+                        if request.query.get('service') == 'git-upload-pack':
+                            proc = await prepare_to_run_async_with_pipe_out(
+                                'git', 'upload-pack', '--strict', '--stateless-rpc', '--http-backend-info-refs',
+                                worker.data_of_upstream(cache_info.upstream),
+                                env=cache_info.env(request),
+                                cwd=worker.paths.repos
+                            )
+                            response = web.StreamResponse()
+                            response.headers.add('Content-Type', 'application/x-git-upload-pack-advertisement')
+                            response.headers.add("Cache-Control", "no-cache")
+                            await response.prepare(request)
+                            await response.write(b"001e# service=git-upload-pack\n0000")
+                            await proc_to_response(proc, response)
+                            return response
+                proc = await prepare_to_run_async_with_pipe_out(
                     'git', 'http-backend',
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
                     env=cache_info.env(request),
                     cwd=worker.paths.repos
                 )
             case 'POST':
-                proc = await asyncio.create_subprocess_exec(
+                match cache_info.service:
+                    case 'git-upload-pack':
+                        proc = await prepare_to_run_async_with_pipe_in_out(
+                            'git', 'upload-pack', '--strict', '--stateless-rpc',
+                            worker.data_of_upstream(cache_info.upstream),
+                            env=cache_info.env(request),
+                            cwd=worker.paths.repos
+                        )
+                        await request_to_proc(request, proc)
+                        response = web.StreamResponse()
+                        await response.prepare(request)
+                        await proc_to_response(proc, response)
+                        return response
+                proc = await prepare_to_run_async_with_pipe_in_out(
                     'git', 'http-backend',
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
                     env=cache_info.env(request),
                     cwd=worker.paths.repos
                 )
-                proc.stdin.write(await request.read())
-                await proc.stdin.drain()
-                proc.stdin.close()
-                await proc.stdin.wait_closed()
+                await request_to_proc(request, proc)
             case _:
                 return web.Response(status=403, text="invalid method to cache route")
+        print(f"[gacher] fall back to git-http-backend: '{request.url}'")
         response = web.StreamResponse()
         for line in (await proc.stdout.readuntil(b'\r\n\r\n'))[:-4].split(b'\r\n'):
             if len(line) == 0:
@@ -541,16 +605,7 @@ if __name__ == '__main__':
                 continue
             response.headers.add(splitted[0].decode('latin-1'), splitted[1].decode('latin-1'))
         await response.prepare(request)
-
-        while True:
-            buffer = await proc.stdout.read(0x100000)
-            if not buffer:
-                break
-            await response.write(buffer)
-
-        await proc.wait()
-        await response.write_eof()
-
+        await proc_to_response(proc, response)
         return response
 
     async def route_uncachable(request):
