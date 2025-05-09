@@ -407,6 +407,9 @@ def response_bad_method(path: str, method: str, required: str):
     text = f"method {method} to {path} not allowed, allowing {required}"
     return web.Response(status=403, text=text)
 
+def report_access(request, route: str):
+    print(f"[gacher] route {route}: '{request.headers.get('X-Forwarded-Host', request.remote)}' -> {request.method} -> '{request.rel_url}'")
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
                     prog='gacher',
@@ -435,6 +438,7 @@ if __name__ == '__main__':
     worker = Worker(args.repos, WorkerTimes(args.time_hot, args.time_warm, args.time_drop, args.time_remove, args.interval), args.redirect)
 
     async def route_cache(request):
+        report_access(request, 'cache')
         scheme = request.match_info['scheme']
         host = request.match_info['host']
         if not host:
@@ -488,7 +492,6 @@ if __name__ == '__main__':
                 env=env,
                 cwd=worker.paths.repos
             )
-
         for line in (await proc.stdout.readuntil(b'\r\n\r\n'))[:-4].split(b'\r\n'):
             if len(line) == 0:
                 continue
@@ -510,12 +513,15 @@ if __name__ == '__main__':
         return response
 
     async def route_uncachable(request):
+        report_access(request, 'uncachable')
         return web.Response(status=403, text="uncachable access")
 
     async def route_stat(request):
+        report_access(request, 'stat')
         return web.json_response(await worker.stat())
 
     async def route_help(request):
+        report_access(request, 'help')
         return web.Response(text=textwrap.dedent(f"""
             gacher is a read-only git caching server and you shall access it through the following routing paths (the following examples all use http://gacher.lan:{args.port}/ as the server and remember to adapt it accordingly):
 
@@ -549,6 +555,7 @@ if __name__ == '__main__':
 
     if args.redirect:
         async def route_upstream(request):
+            report_access(request, 'upstream')
             redirect = f"{worker.redirect}{request.rel_url}"
             return web.HTTPMovedPermanently(redirect)
         route_root = route_upstream
