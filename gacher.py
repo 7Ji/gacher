@@ -487,48 +487,34 @@ if __name__ == '__main__':
 
     worker = Worker(args.repos, WorkerTimes(args.time_hot, args.time_warm, args.time_drop, args.time_remove, args.interval), args.redirect)
 
-    async def route_cache(request):
+
+    async def route_cache_prepare(request) -> (web.Response, dict):
         cache_info, response = CacheInfo.new(request)
         if response:
-            return response
+            return (response, None)
 
         if await worker.cache_repo(cache_info.upstream):
-            return web.Response(status=500, text="failed to cache upstream")
+            return (web.Response(status=500, text="failed to cache upstream"), None)
 
         if worker.redirect:
             redirect = f"{worker.redirect}{cache_info.relative}"
             print(f"[gacher] redirecting to '{redirect}'")
-            return web.HTTPMovedPermanently(redirect)
+            return (web.HTTPMovedPermanently(redirect), None)
 
+        return (
+            None,
+            {
+                "CONTENT_TYPE": request.headers.get('Content-Type', ''),
+                "REQUEST_METHOD": request.method,
+                "PATH_INFO": f"/{RepoPaths.calculate_relative_data(cache_info.upstream)}/{cache_info.service}",
+                "QUERY_STRING": request.query_string,
+                "GIT_HTTP_EXPORT_ALL": "",
+                "GIT_PROJECT_ROOT": "."
+            }
+        )
+
+    async def route_cache_end(request, proc) -> web.Response:
         response = web.StreamResponse()
-        env = {
-            "CONTENT_TYPE": request.headers.get('Content-Type', ''),
-            "REQUEST_METHOD": request.method,
-            "PATH_INFO": f"/{RepoPaths.calculate_relative_data(cache_info.upstream)}/{cache_info.service}",
-            "QUERY_STRING": request.query_string,
-            "GIT_HTTP_EXPORT_ALL": "",
-            "GIT_PROJECT_ROOT": "."
-        }
-        if request.method == "POST":
-            proc = await asyncio.create_subprocess_exec(
-                'git', 'http-backend',
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                env=env,
-                cwd=worker.paths.repos
-            )
-            proc.stdin.write(await request.read())
-            await proc.stdin.drain()
-            proc.stdin.close()
-            await proc.stdin.wait_closed()
-        else:
-            proc = await asyncio.create_subprocess_exec(
-                'git', 'http-backend',
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                env=env,
-                cwd=worker.paths.repos
-            )
         for line in (await proc.stdout.readuntil(b'\r\n\r\n'))[:-4].split(b'\r\n'):
             if len(line) == 0:
                 continue
@@ -550,10 +536,36 @@ if __name__ == '__main__':
         return response
 
     async def route_cache_get(request):
-        return await route_cache(request)
+        report_access(request, 'cache(get)')
+        response, env = await route_cache_prepare(request)
+        if response:
+            return response
+        proc = await asyncio.create_subprocess_exec(
+            'git', 'http-backend',
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=worker.paths.repos
+        )
+        return await route_cache_end(request, proc)
 
     async def route_cache_post(request):
-        return await route_cache(request)
+        report_access(request, 'cache(post)')
+        response, env = await route_cache_prepare(request)
+        if response:
+            return response
+        proc = await asyncio.create_subprocess_exec(
+            'git', 'http-backend',
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=worker.paths.repos
+        )
+        proc.stdin.write(await request.read())
+        await proc.stdin.drain()
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
+        return await route_cache_end(request, proc)
 
     async def route_uncachable(request):
         report_access(request, 'uncachable')
