@@ -27,8 +27,7 @@ Supported arguments are:
 - `--reset`: on startup, remove everything in {repos}, instead of trying to pick existing repos up (default: `False`)
 - `--time-hot TIME_HOT` time in seconds after which a repo shall be updated when it is being fetched by a client (default: `10`)
 - `--time-warm TIME_WARM` time in seconds after which a repo shall be updated when it has not been fetched by any client (default: `3600`)
-- `--time-drop TIME_DROP` time in seconds after which a repo shall be dropped/unmanaged if it hasn't been reached by any client (default: `86400`)
-- `--time-remove TIME_REMOVE` time in seconds after which a unmanaged repo shall be removed/deleted (default: `604800`)
+- `--time-drop TIME_DROP` time in seconds after which a repo shall be removed if it hasn't been reached by any client (default: `604800`)
 - `--interval INTERVAL` time interval in seconds to perform routine check and act accordingly to `{time_warm}`, `{time_drop}` and `{time_remove}` (default: `1`)
 - `--redirect REDIRECT` instead of serving the cached repos directly by ourselves, return 301 redirect to such address, useful if you combine gacher with a web frontend, e.g. cgit, it is recommended to use `{repos}`/links as its root in that case (default: )
 
@@ -41,7 +40,7 @@ By default the server binds to `http://0.0.0.0:8080`, to use the cache fetch an 
 git clone http://127.0.0.1:8080/cache/github.com/7Ji/gacher.git
 ```
 
-gacher would figure out the upstream `https://github.com/7Ji/gacher.git`, fetch from it with `git` if it does not exist locally at `./repos/data/[hash of upsteam]` or is not new enough, then serve from the local cache `./repos/data/[hash of upstream]` by calling `git-http-backend` as a CGI and bridge the connection.
+gacher would figure out the upstream `https://github.com/7Ji/gacher.git`, fetch from it with `git` if it does not exist locally at `./repos/data/[hash of upsteam]` or is not new enough, then serve from the local cache `./repos/data/[hash of upstream]` by calling `git-upload-pack` or `git-http-backend` (as fallback) as a CGI and bridge the connection.
 
 Note you can also specify the upstream scheme explicitly, e.g.:
 ```
@@ -79,8 +78,7 @@ gacher has several routes including the main `/cache/` route, these are:
     - always read-only and you shall never push through the corresponding link
     - when fetching through such cache, if the corresponding repo was already fetched and updated shorter than `{time_hot}` seconds (by default 10 seconds), the local cache would be used
     - if a cached repo was not accessed longer than `{time_warm}` seconds (by default 3600 seconds, i.e. 1 hr), it would be updated to sync with upstream
-    - if a cached repo was not accessed longer than `{time_drop}` seconds (by default 86400 seconds, i.e. 1 day), it would be dropped from gacher's run-time storage (but kept on-disk)
-    - if a on-disk dropped repo was not accessed longer than `{time_remove}` seconds (by default 604800, i.e. 1 week), it would be removed entirely to free up disk space
+    - if a cached repo was not accessed longer than `{time_cold}` seconds (by default 86400 seconds, i.e. 1 day), it would be dropped from gacher's run-time storage and also removed fron disk
     - if `{redirect}` is set, after repo cached, instead of serving it directly, a 301 redirect would be returned to it on which e.g. nginx + cgit + git-http-backend is running and performs better than aiohttp
 - `/stat` (`GET`)
     - return JSON-formatted stat of all repos
@@ -94,7 +92,7 @@ gacher can be used as a standalone server application, or used in combination wi
 
 ### Standalone
 
-Just run `./gacher.py`, access to cache go through `http://[host]:8080/cache`, cached repos are served by `git-http-backend` called by gacher itself
+Just run `./gacher.py`, access to cache go through `http://[host]:8080/cache`, cached repos are served by `git-upload-pack` or `git-http-backend` (as fallback) called by gacher itself
 
 ### With nginx and cgit
 

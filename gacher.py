@@ -88,15 +88,11 @@ async def run_async_check_with_stdout(
 def hash_str_to_str(content: str) -> str:
     return xxhash.xxh3_64_hexdigest(content)
 
-def hash_str_to_bytes(content: str) -> bytes:
-    return xxhash.xxh3_64_digest(content)
-
 class RepoState(str, enum.Enum):
     UPDATING = "updating"
     HOT = "hot"
     WARM = "warm"
     COLD = "cold"
-    DEAD = "dead"
 
 @dataclasses.dataclass
 class RepoStat:
@@ -143,8 +139,7 @@ class RepoTimes:
 class WorkerTimes:
     hot: int
     warm: int
-    drop: int
-    remove: int
+    cold: int
     interval: int
 
 class Repo:
@@ -199,8 +194,9 @@ class Repo:
             self.paths.config.touch()
             self.hits += 1
 
-    def need_update(self, time_hot: float) -> bool:
-        return time.time() - self.times.fetch > time_hot
+    def need_update(self, times: WorkerTimes) -> bool:
+        time_now = time.time()
+        return time_now - self.times.access <= times.warm and time_now - self.times.fetch > times.hot
 
     # this is only called in update(), lock was aquired there
     async def update_inner(self) -> WorkStatus:
@@ -225,11 +221,11 @@ class Repo:
         print(f"[gacher] updated '{self.upstream}'")
         return WorkStatus.OK
 
-    async def update(self, time_hot: float) -> WorkStatus:
-        if not self.need_update(time_hot):
+    async def update(self, times: WorkerTimes) -> WorkStatus:
+        if not self.need_update(times):
             return WorkStatus.OK
         async with self.lock:
-            if not self.need_update(time_hot):
+            if not self.need_update(times):
                 return WorkStatus.OK
             return await self.update_inner()
 
@@ -299,7 +295,7 @@ class Worker:
                     continue
                 if not entry.is_dir():
                     continue
-                if time.time() - (entry / "config").stat().st_mtime > self.times.drop:
+                if time.time() - (entry / "config").stat().st_mtime > self.times.cold:
                     continue
                 (status, child_out) = await run_async_check_with_stdout(
                     'git', 'config', 'remote.origin.url',
@@ -309,14 +305,14 @@ class Worker:
                     shutil.rmtree(entry)
                     continue
                 upstream = child_out.strip().decode('utf-8')
-                key = hash_str_to_bytes(upstream)
+                key = hash_str_to_str(upstream)
                 if key in self.repos:
                     raise Exception(f"duplicated upstream {upstream}")
                 print(f"[gacher] discovered repo '{entry}' for '{upstream}'")
                 self.repos[key] = await Repo.new(upstream, self.paths.repos)
 
     async def cache_repo(self, upstream: str) -> WorkStatus:
-        key = hash_str_to_bytes(upstream)
+        key = hash_str_to_str(upstream)
         must_update = False
         async with self.lock:
             if key not in self.repos:
@@ -324,7 +320,7 @@ class Worker:
                 must_update = True
             repo = self.repos[key]
         await repo.hit()
-        update_failed = await repo.update(self.times.hot)
+        update_failed = await repo.update(self.times)
         if must_update and update_failed:
             async with self.lock:
                 print(f"[gacher] initial update of '{upstream}' failed, removing")
@@ -346,8 +342,8 @@ class Worker:
                     for (key, repo) in items:
                         if repo.lock.locked():
                             continue
-                        if time_now - repo.times.access > self.times.drop:
-                            print(f"[gacher] dropping '{repo.upstream}' from run-time cache, the on-disk cache is kept in place")
+                        if time_now - repo.times.access > self.times.cold:
+                            print(f"[gacher] removing '{repo.upstream}' from run-time cache")
                             async with self.lock:
                                 del self.repos[key]
                     del items
@@ -361,12 +357,20 @@ class Worker:
                             continue
                         if entry.name in keys:
                             continue
-                        if not entry.is_dir():
-                            continue
-                        if time.time() - (entry / "config").stat().st_mtime <= self.times.remove:
-                            continue
-                        print(f"[gacher] removing '{entry}' from disk")
-                        shutil.rmtree(entry)
+                        if entry.is_dir():
+                            if time.time() - (entry / "config").stat().st_mtime <= self.times.cold:
+                                continue
+                            print(f"[gacher] removing folder '{entry}' from disk")
+                            try:
+                                shutil.rmtree(entry)
+                            except:
+                                pass
+                        else:
+                            print(f"[gacher] removing file '{entry}' from disk")
+                            try:
+                                entry.unlink()
+                            except:
+                                pass
                     del keys
                     step += 1
                 # links
@@ -397,7 +401,7 @@ class Worker:
                     for repo in tuple(self.repos.values()):
                         if repo.lock.locked():
                             continue
-                        await repo.update(self.times.warm)
+                        await repo.update(self.times)
                     step = 0
             await asyncio.sleep(self.times.interval)
 
@@ -521,18 +525,17 @@ if __name__ == '__main__':
     parser.add_argument('--reset', action='store_true', help="on startup, remove everything in {repos}, instead of trying to pick existing repos up")
     parser.add_argument('--time-hot', default=10, type=int, help="time in seconds after which a repo shall be updated when it is being fetched by a client")
     parser.add_argument('--time-warm', default=3600, type=int, help="time in seconds after which a repo shall be updated when it has not been fetched by any client")
-    parser.add_argument('--time-drop', default=86400, type=int, help="time in seconds after which a repo shall be dropped/unmanaged if it hasn't been reached by any client")
-    parser.add_argument('--time-remove', default=604800, type=int, help="time in seconds after which a unmanaged repo shall be removed/deleted")
+    parser.add_argument('--time-cold', default=604800, type=int, help="time in seconds after which a repo shall be removed if it hasn't been reached by any client")
     parser.add_argument('--interval', default=1, type=int, help="time interval in seconds to perform routine check and act accordingly to {time_warm}, {time_drop} and {time_remove}")
     parser.add_argument('--redirect', default='', type=str, help="instead of serving the cached repos directly by ourselves, return 301 redirect to such address, useful if you combine gacher with a web frontend, e.g. cgit, it is recommended to use {repos}/links as its root in that case")
 
     args = parser.parse_args()
-    if args.time_remove <= args.time_drop:
-        raise ValueError("time_remove must be longer than time_drop")
+    if args.time_cold <= args.time_warm:
+        raise ValueError("time_cold must be longer than time_warm")
     if args.time_warm <= args.time_hot:
         raise ValueError("time_warm must be longer than time_hot")
 
-    worker = Worker(args.repos, WorkerTimes(args.time_hot, args.time_warm, args.time_drop, args.time_remove, args.interval), args.redirect)
+    worker = Worker(args.repos, WorkerTimes(args.time_hot, args.time_warm, args.time_cold, args.interval), args.redirect)
 
     async def route_cache(request):
         report_access(request, 'cache')
@@ -630,8 +633,7 @@ if __name__ == '__main__':
                 - always read-only and you shall never push through the corresponding link
                 - when fetching through such cache, if the corresponding repo was already fetched and updated shorter than {args.time_hot} seconds, the local cache would be used
                 - if a cached repo was not accessed longer than {args.time_warm} seconds, it would be updated to sync with upstream
-                - if a cached repo was not accessed longer than {args.time_drop} seconds, it would be dropped from gacher's run-time storage (but kept on-disk)
-                - if a on-disk dropped repo was not accessed longer than {args.time_remove} seconds, it would be removed entirely to free up disk space
+                - if a cached repo was not accessed longer than {args.time_cold} seconds, it would be dropped from gacher's run-time storage and also removed fron disk
                 - if '{args.redirect}' is set, after repo cached, instead of serving it directly, a 301 redirect would be returned to it on which e.g. nginx + cgit + git-http-backend is running and performs better than aiohttp
 
             /stat:
