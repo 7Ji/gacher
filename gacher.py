@@ -221,8 +221,7 @@ class Repo:
                 '-c', 'remote.origin.mirror=true',
                 '-c', 'fetch.showForcedUpdates=false',
                 '-c', 'advice.fetchShowForcedUpdates=false',
-            'fetch',
-                'origin', '+refs/*:refs/*',
+            'remote', 'update', '--prune', 'origin',
             max_tries=3,
             cwd=self.paths.data
         ):
